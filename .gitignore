@@ -18,3 +18,5 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+household_db_schema.sql
