@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Household Expenses</title>
+
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+<div class="container">
+
+    <header>
+        <h1>Household Expenses</h1>
+        <p>Record your daily expenses</p>
+    </header>
+
+
+    <!-- Expense Form -->
+    <section class="card">
+
+        <h2>Add Expense</h2>
+
+        <form id="expenseForm">
+
+            <div class="form-grid">
+
+                <!-- Date -->
+                <div class="form-group">
+                    <label for="transaction_date">Date</label>
+                    <input
+                        type="date"
+                        id="transaction_date"
+                        name="transaction_date"
+                        required
+                    >
+                </div>
+
+
+                <!-- Merchant -->
+                <div class="form-group">
+                    <label for="merchant">Merchant</label>
+                    <input
+                        type="text"
+                        id="merchant"
+                        name="merchant"
+                        placeholder="e.g. Jollibee"
+                        maxlength="150"
+                        required
+                    >
+                </div>
+
+
+                <!-- Amount -->
+                <div class="form-group">
+                    <label for="amount">Amount</label>
+                    <div class="amount-input">
+                        <span>₱</span>
+                        <input
+                            type="number"
+                            id="amount"
+                            name="amount"
+                            placeholder="0.00"
+                            min="0.01"
+                            step="0.01"
+                            required
+                        >
+                    </div>
+                </div>
+
+
+                <!-- Payment Source -->
+                <div class="form-group">
+                    <label for="payment_source">Payment Source</label>
+
+                    <div class="payment-options">
+
+                        <button
+                            type="button"
+                            class="payment-option"
+                            data-value="BPI - Amore Cashback"
+                        >
+                            BPI - Amore Cashback
+                        </button>
+
+                        <button
+                            type="button"
+                            class="payment-option"
+                            data-value="UB - Rewards"
+                        >
+                            UB - Rewards
+                        </button>
+
+                        <button
+                            type="button"
+                            class="payment-option"
+                            data-value="UB - Platinum"
+                        >
+                            UB - Platinum
+                        </button>
+
+                        <button
+                            type="button"
+                            class="payment-option"
+                            data-value="Cash"
+                        >
+                            Cash
+                        </button>
+
+                        <button
+                            type="button"
+                            class="payment-option"
+                            data-value="Gcash"
+                        >
+                            Gcash
+                        </button>
+
+                        <button
+                            type="button"
+                            class="payment-option"
+                            data-value="Debit - Maissy"
+                        >
+                            Debit - Maissy
+                        </button>
+
+                    </div>
+
+                    <input
+                        type="hidden"
+                        id="payment_source"
+                        name="payment_source"
+                        required
+                    >
+                </div>
+
+
+                <!-- Category -->
+                <div class="form-group">
+                    <label for="category">Category</label>
+
+                    <input
+                        type="text"
+                        id="category"
+                        name="category"
+                        placeholder="e.g. Food"
+                    >
+                </div>
+
+
+                <!-- Description -->
+                <div class="form-group">
+                    <label for="description">
+                        Description
+                        <span class="optional">(optional)</span>
+                    </label>
+
+                    <input
+                        type="text"
+                        id="description"
+                        name="description"
+                        placeholder="e.g. Lunch"
+                    >
+                </div>
+
+            </div>
+
+
+            <!-- Notes -->
+            <div class="form-group">
+                <label for="notes">
+                    Notes
+                    <span class="optional">(optional)</span>
+                </label>
+
+                <textarea
+                    id="notes"
+                    name="notes"
+                    placeholder="Additional notes..."
+                    rows="3"
+                ></textarea>
+            </div>
+
+
+            <button
+                type="submit"
+                id="saveButton"
+                class="save-button"
+            >
+                Save Expense
+            </button>
+
+        </form>
+
+
+        <!-- Message -->
+        <div id="message" class="message"></div>
+
+    </section>
+
+
+    <!-- Recent Expenses -->
+    <section class="card">
+
+        <div class="section-header">
+            <div>
+                <h2>Recent Expenses</h2>
+                <p>Your latest recorded receipts</p>
+            </div>
+
+            <button
+                id="refreshButton"
+                class="refresh-button"
+            >
+                Refresh
+            </button>
+        </div>
+
+
+        <div id="expensesContainer">
+
+            <p class="loading">
+                Loading expenses...
+            </p>
+
+        </div>
+
+    </section>
+
+</div>
+
+
+<script src="/static/app.js"></script>
+
+</body>
+</html>
