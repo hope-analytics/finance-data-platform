@@ -18,7 +18,6 @@
         <p>Record your daily expenses</p>
     </header>
 
-
     <!-- Expense Form -->
     <section class="card">
 
@@ -39,7 +38,6 @@
                     >
                 </div>
 
-
                 <!-- Merchant -->
                 <div class="form-group">
                     <label for="merchant">Merchant</label>
@@ -53,12 +51,11 @@
                     >
                 </div>
 
-
                 <!-- Amount -->
                 <div class="form-group">
                     <label for="amount">Amount</label>
                     <div class="amount-input">
-                        <span>₱</span>
+                        <span aria-hidden="true">₱</span>
                         <input
                             type="number"
                             id="amount"
@@ -71,71 +68,26 @@
                     </div>
                 </div>
 
-
                 <!-- Payment Source -->
                 <div class="form-group">
-                    <label for="payment_source">Payment Source</label>
+                    <span class="form-label">Payment Source</span>
 
-                    <div class="payment-options">
-
-                        <button
-                            type="button"
-                            class="payment-option"
-                            data-value="BPI - Amore Cashback"
-                        >
-                            BPI - Amore Cashback
-                        </button>
-
-                        <button
-                            type="button"
-                            class="payment-option"
-                            data-value="UB - Rewards"
-                        >
-                            UB - Rewards
-                        </button>
-
-                        <button
-                            type="button"
-                            class="payment-option"
-                            data-value="UB - Platinum"
-                        >
-                            UB - Platinum
-                        </button>
-
-                        <button
-                            type="button"
-                            class="payment-option"
-                            data-value="Cash"
-                        >
-                            Cash
-                        </button>
-
-                        <button
-                            type="button"
-                            class="payment-option"
-                            data-value="Gcash"
-                        >
-                            Gcash
-                        </button>
-
-                        <button
-                            type="button"
-                            class="payment-option"
-                            data-value="Debit - Maissy"
-                        >
-                            Debit - Maissy
-                        </button>
-
+                    <div
+                        class="payment-options"
+                        id="paymentOptions"
+                        role="group"
+                        aria-label="Payment source options"
+                    >
+                        <p class="loading">Loading payment sources...</p>
                     </div>
 
                     <input
                         type="hidden"
-                        id="payment_source"
-                        name="payment_source"
+                        id="payment_source_id"
+                        name="payment_source_id"
                         required
                     >
                 </div>
-
 
                 <!-- Category -->
                 <div class="form-group">
@@ -148,7 +100,6 @@
                         placeholder="e.g. Food"
                     >
                 </div>
-
 
                 <!-- Description -->
                 <div class="form-group">
@@ -167,7 +118,6 @@
 
             </div>
 
-
             <!-- Notes -->
             <div class="form-group">
                 <label for="notes">
@@ -183,7 +133,6 @@
                 ></textarea>
             </div>
 
-
             <button
                 type="submit"
                 id="saveButton"
@@ -194,12 +143,15 @@
 
         </form>
 
-
         <!-- Message -->
-        <div id="message" class="message"></div>
+        <div
+            id="message"
+            class="message"
+            role="status"
+            aria-live="polite"
+        ></div>
 
     </section>
-
 
     <!-- Recent Expenses -->
     <section class="card">
@@ -211,13 +163,13 @@
             </div>
 
             <button
+                type="button"
                 id="refreshButton"
                 class="refresh-button"
             >
                 Refresh
             </button>
         </div>
-
 
         <div id="expensesContainer">
 
@@ -230,7 +182,6 @@
     </section>
 
 </div>
-
 
 <script src="/static/app.js"></script>
 

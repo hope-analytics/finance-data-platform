@@ -55,7 +55,8 @@ header p {
     gap: 7px;
 }
 
-label {
+label,
+.form-label {
     font-size: 14px;
     font-weight: 600;
 }
@@ -178,6 +179,11 @@ textarea {
     background: #f9fafb;
 }
 
+.refresh-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .expense-list {
     display: flex;
     flex-direction: column;
@@ -223,30 +229,6 @@ textarea {
     padding: 25px;
 }
 
-@media (max-width: 650px) {
-
-    .container {
-        padding: 20px 14px 40px;
-    }
-
-    .card {
-        padding: 18px;
-    }
-
-    .form-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .expense-row {
-        grid-template-columns: 80px 1fr;
-    }
-
-    .expense-amount {
-        grid-column: 2;
-        text-align: left;
-    }
-}
-
 .payment-options {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -272,6 +254,11 @@ textarea {
     border-color: #9ca3af;
 }
 
+.payment-option:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
 .payment-option.selected {
     border-color: #2563eb;
     background: #eff6ff;
@@ -279,7 +266,28 @@ textarea {
     font-weight: 600;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 650px) {
+    .container {
+        padding: 20px 14px 40px;
+    }
+
+    .card {
+        padding: 18px;
+    }
+
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .expense-row {
+        grid-template-columns: 80px 1fr;
+    }
+
+    .expense-amount {
+        grid-column: 2;
+        text-align: left;
+    }
+
     .payment-options {
         grid-template-columns: 1fr;
     }

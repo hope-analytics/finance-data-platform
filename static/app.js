@@ -3,7 +3,8 @@ const message = document.getElementById("message");
 const saveButton = document.getElementById("saveButton");
 const expensesContainer = document.getElementById("expensesContainer");
 const refreshButton = document.getElementById("refreshButton");
-
+const paymentOptionsContainer = document.getElementById("paymentOptions");
+const paymentSourceId = document.getElementById("payment_source_id");
 
 // ---------------------------------
 // Set today's date
@@ -20,7 +21,6 @@ function setToday() {
         `${year}-${month}-${day}`;
 }
 
-
 // ---------------------------------
 // Show message
 // ---------------------------------
@@ -31,7 +31,6 @@ function showMessage(text, type) {
     message.className = `message ${type}`;
 
 }
-
 
 // ---------------------------------
 // Format amount
@@ -45,7 +44,6 @@ function formatAmount(amount) {
     }).format(amount);
 
 }
-
 
 // ---------------------------------
 // Format date
@@ -63,12 +61,14 @@ function formatDate(dateString) {
 
 }
 
-
 // ---------------------------------
 // Load expenses
 // ---------------------------------
 
 async function loadExpenses() {
+
+    refreshButton.disabled = true;
+    refreshButton.textContent = "Refreshing...";
 
     expensesContainer.innerHTML =
         `<p class="loading">Loading expenses...</p>`;
@@ -81,7 +81,7 @@ async function loadExpenses() {
             throw new Error("Failed to load expenses");
         }
 
-        const expenses = await response.json();
+        const expenses = await parseResponse(response);
 
         if (expenses.length === 0) {
 
@@ -90,7 +90,6 @@ async function loadExpenses() {
 
             return;
         }
-
 
         const list = document.createElement("div");
         list.className = "expense-list";
@@ -112,7 +111,7 @@ async function loadExpenses() {
                     </div>
 
                     <div class="expense-details">
-                        ${expense.payment_source}
+                        ${escapeHtml(expense.payment_name)}
                         ${expense.category ? " · " + escapeHtml(expense.category) : ""}
                     </div>
                 </div>
@@ -126,7 +125,6 @@ async function loadExpenses() {
 
         });
 
-
         expensesContainer.innerHTML = "";
         expensesContainer.appendChild(list);
 
@@ -136,9 +134,12 @@ async function loadExpenses() {
             `<p class="empty">Unable to load expenses.</p>`;
 
         console.error(error);
+    } finally {
+
+        refreshButton.disabled = false;
+        refreshButton.textContent = "Refresh";
     }
 }
-
 
 // ---------------------------------
 // Basic HTML escaping
@@ -158,6 +159,25 @@ function escapeHtml(value) {
         .replaceAll("'", "&#039;");
 }
 
+// ---------------------------------
+// Parse API response
+// ---------------------------------
+
+async function parseResponse(response) {
+
+    const contentType =
+        response.headers.get("content-type") || "";
+
+    if (contentType.includes("application/json")) {
+        return await response.json();
+    }
+
+    const text = await response.text();
+
+    return {
+        detail: text || "Unexpected server response."
+    };
+}
 
 // ---------------------------------
 // Submit expense
@@ -167,11 +187,20 @@ form.addEventListener("submit", async function(event) {
 
     event.preventDefault();
 
+    if (!paymentSourceId.value) {
+
+        showMessage(
+            "Please select a payment source.",
+            "error"
+        );
+
+        return;
+    }
+
     saveButton.disabled = true;
     saveButton.textContent = "Saving...";
 
     message.className = "message";
-
 
     const expense = {
 
@@ -190,13 +219,12 @@ form.addEventListener("submit", async function(event) {
         category:
             document.getElementById("category").value.trim() || null,
 
-        payment_source:
-            document.getElementById("payment_source").value,
+        payment_source_id:
+            Number(paymentSourceId.value),
 
         notes:
             document.getElementById("notes").value.trim() || null
     };
-
 
     try {
 
@@ -211,23 +239,21 @@ form.addEventListener("submit", async function(event) {
             body: JSON.stringify(expense)
         });
 
-
-        const data = await response.json();
-
+        const data = await parseResponse(response);
 
         if (!response.ok) {
+
+            const data = await parseResponse(response);
 
             throw new Error(
                 data.detail || "Failed to save expense"
             );
         }
 
-
         showMessage(
             `Expense saved successfully.`,
             "success"
         );
-
 
         // Reset form
         form.reset();
@@ -235,13 +261,17 @@ form.addEventListener("submit", async function(event) {
         // Put today's date back
         setToday();
 
+        paymentSourceId.value = "";
+
+        paymentOptionsContainer
+            .querySelectorAll(".payment-option")
+            .forEach(option => option.classList.remove("selected"));
+
         // Put cursor back on merchant
         document.getElementById("merchant").focus();
 
-
         // Refresh expense list
         await loadExpenses();
-
 
     } catch (error) {
 
@@ -258,9 +288,7 @@ form.addEventListener("submit", async function(event) {
         saveButton.textContent = "Save Expense";
 
     }
-
 });
-
 
 // ---------------------------------
 // Refresh button
@@ -271,26 +299,77 @@ refreshButton.addEventListener(
     loadExpenses
 );
 
-
 // ---------------------------------
 // Initial page load
 // ---------------------------------
 
-setToday();
-loadExpenses();
+async function initializeApp() {
+    setToday();
+    await loadPaymentSources();
+    await loadExpenses();
+}
 
-const paymentOptions = document.querySelectorAll(".payment-option");
-const paymentSource = document.getElementById("payment_source");
+window.addEventListener("load", initializeApp);
+// ---------------------------------
+// Load payment sources
+// ---------------------------------
 
-paymentOptions.forEach(button => {
-    button.addEventListener("click", () => {
+async function loadPaymentSources() {
 
-        paymentSource.value = button.dataset.value;
+    try {
 
-        paymentOptions.forEach(option => {
-            option.classList.remove("selected");
+        const response = await fetch("/app/payment-sources");
+
+        if (!response.ok) {
+
+            const data = await parseResponse(response);
+
+            throw new Error(
+                data.detail || "Failed to load payment sources"
+            );
+        }
+
+        const paymentSources = await parseResponse(response);
+
+        paymentOptionsContainer.innerHTML = "";
+
+        paymentSources.forEach(source => {
+
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "payment-option";
+            button.dataset.value = source.payment_source_id;
+            button.setAttribute("aria-pressed", "false")
+            button.textContent = source.payment_name;
+
+            button.addEventListener("click", () => {
+
+                paymentSourceId.value = source.payment_source_id;
+
+                paymentOptionsContainer
+                    .querySelectorAll(".payment-option")
+                    .forEach(option => {
+                        option.classList.remove("selected");
+                        option.setAttribute("aria-pressed", "false");
+                    });
+
+                button.classList.add("selected");
+                button.setAttribute("aria-pressed", "true");
+            });
+
+            paymentOptionsContainer.appendChild(button);
         });
 
-        button.classList.add("selected");
-    });
-});
+        if (paymentSources.length === 0) {
+            paymentOptionsContainer.innerHTML =
+                `<p class="empty">No payment sources are available.</p>`;
+        }
+
+    } catch (error) {
+
+        paymentOptionsContainer.innerHTML =
+            `<p class="empty">Unable to load payment sources.</p>`;
+
+        console.error(error);
+    }
+}

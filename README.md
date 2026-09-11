@@ -70,7 +70,7 @@ The current platform uses a `transactions` table designed around the core attrib
 - Description
 - Amount
 - Category
-- Payment source
+- Payment source reference
 - Notes
 - Creation timestamp
 
@@ -135,7 +135,7 @@ requirements.txt        Python dependencies
 
 The transaction capture application, PostgreSQL data layer, and Apache Superset analytics layer are operational.
 
-The current implementation focuses on establishing a reliable foundation for structured financial transaction data and future analytics capabilities.
+The current implementation establishes a reliable foundation for structured financial transaction data and analytics, with the platform designed for future expansion into more advanced financial insights and cash-flow analysis.
 
 ## Project Direction
 

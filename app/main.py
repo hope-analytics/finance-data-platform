@@ -1,337 +1,292 @@
 import os
-import secrets
-
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
+from typing import Optional
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException, Header, status, Depends
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from starlette.middleware.base import BaseHTTPMiddleware
-
 from pydantic import BaseModel, Field
+from psycopg2 import connect
+from psycopg2.extras import RealDictCursor
 
-from app.database import get_connection
 
-
-# --------------------------------------------------
+# ---------------------------------
 # Configuration
-# --------------------------------------------------
+# ---------------------------------
 
-load_dotenv()
-
+DATABASE_URL = os.getenv("DATABASE_URL")
+APP_USERNAME = os.getenv("APP_USERNAME")
+APP_PASSWORD = os.getenv("APP_PASSWORD")
 API_TOKEN = os.getenv("API_TOKEN")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not configured")
+
+if not APP_USERNAME or not APP_PASSWORD:
+    raise RuntimeError("APP_USERNAME and APP_PASSWORD are not configured")
 
 if not API_TOKEN:
     raise RuntimeError("API_TOKEN is not configured")
 
-APP_USERNAME = os.getenv("APP_USERNAME")
-APP_PASSWORD = os.getenv("APP_PASSWORD")
 
-security = HTTPBasic()
-def authenticate(
-    credentials: HTTPBasicCredentials = Depends(security),
+# ---------------------------------
+# Application setup
+# ---------------------------------
+
+app = FastAPI(
+    title="Finance Data Platform API",
+    description="API for capturing and retrieving household financial transactions.",
+    version="1.0.0",
+)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+templates = Jinja2Templates(directory="templates")
+
+basic_auth = HTTPBasic()
+bearer_auth = HTTPBearer()
+
+
+# ---------------------------------
+# Database
+# ---------------------------------
+
+def get_connection():
+    return connect(DATABASE_URL)
+
+
+# ---------------------------------
+# Models
+# ---------------------------------
+
+class ExpenseCreate(BaseModel):
+    transaction_date: date
+    merchant: str = Field(..., min_length=1, max_length=150)
+    description: Optional[str] = None
+    amount: Decimal = Field(..., gt=0)
+    category: Optional[str] = None
+    payment_source_id: int
+    notes: Optional[str] = None
+
+
+# ---------------------------------
+# Authentication
+# ---------------------------------
+
+def verify_basic_auth(
+    credentials: HTTPBasicCredentials = Depends(basic_auth),
 ):
-    if not APP_USERNAME or not APP_PASSWORD:
-        raise RuntimeError("APP_USERNAME and APP_PASSWORD must be configured")
-
-    username_correct = secrets.compare_digest(
-        credentials.username,
-        APP_USERNAME,
-    )
-
-    password_correct = secrets.compare_digest(
-        credentials.password,
-        APP_PASSWORD,
-    )
-
-    if not (username_correct and password_correct):
+    if (
+        credentials.username != APP_USERNAME
+        or credentials.password != APP_PASSWORD
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password",
+            detail="Invalid credentials",
             headers={"WWW-Authenticate": "Basic"},
         )
 
     return credentials.username
 
 
-# --------------------------------------------------
-# FastAPI
-# --------------------------------------------------
-
-app = FastAPI(
-    title="Household Expenses",
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
-)
-
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Permissions-Policy"] = (
-            "camera=(), microphone=(), geolocation=()"
-        )
-
-        return response
-
-
-app.add_middleware(SecurityHeadersMiddleware)
-
-app.mount(
-    "/static",
-    StaticFiles(directory="static"),
-    name="static"
-)
-
-templates = Jinja2Templates(
-    directory="templates"
-)
-
-
-# --------------------------------------------------
-# Authentication
-# --------------------------------------------------
-
-def verify_api_token(
-    authorization: str | None = Header(default=None)
+def verify_bearer_token(
+    credentials=Depends(bearer_auth),
 ):
-    expected = f"Bearer {API_TOKEN}"
-
-    if authorization != expected:
+    if credentials.credentials != API_TOKEN:
         raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API token",
         )
 
+    return True
 
-# --------------------------------------------------
-# GUI
-# --------------------------------------------------
 
-@app.get("/app")
-def expense_app(
-    request: Request,
-    username: str = Depends(authenticate)):
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html"
+# ---------------------------------
+# Helpers
+# ---------------------------------
+
+def fetch_expenses():
+    query = """
+        SELECT
+            t.expense_id,
+            t.transaction_date,
+            t.merchant,
+            t.description,
+            t.amount,
+            t.category,
+            t.payment_source_id,
+            ps.payment_name,
+            t.notes,
+            t.created_at
+        FROM transactions AS t
+        JOIN payment_sources AS ps
+            ON ps.payment_source_id = t.payment_source_id
+        ORDER BY t.transaction_date DESC, t.expense_id DESC
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query)
+            return cursor.fetchall()
+
+
+def fetch_payment_sources():
+    query = """
+        SELECT
+            payment_source_id,
+            payment_name,
+            payment_type
+        FROM payment_sources
+        WHERE active = TRUE
+        ORDER BY payment_source_id
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query)
+            return cursor.fetchall()
+
+
+def create_expense(expense: ExpenseCreate):
+    query = """
+        INSERT INTO transactions (
+            transaction_date,
+            merchant,
+            description,
+            amount,
+            category,
+            payment_source_id,
+            notes
+        )
+        SELECT
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            ps.payment_source_id,
+            %s
+        FROM payment_sources AS ps
+        WHERE ps.payment_source_id = %s
+          AND ps.active = TRUE
+        RETURNING
+            expense_id,
+            transaction_date,
+            merchant,
+            description,
+            amount,
+            category,
+            payment_source_id,
+            notes,
+            created_at
+    """
+
+    values = (
+        expense.transaction_date,
+        expense.merchant,
+        expense.description,
+        expense.amount,
+        expense.category,
+        expense.notes,
+        expense.payment_source_id,
     )
 
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query, values)
 
-# --------------------------------------------------
-# Expense model
-# --------------------------------------------------
+            result = cursor.fetchone()
 
-class ExpenseCreate(BaseModel):
-    transaction_date: date
-    merchant: str = Field(
-        min_length=1,
-        max_length=150
-    )
-    description: str | None = None
-    amount: Decimal = Field(gt=0)
-    category: str | None = None
-    payment_source: str = Field(
-        min_length=1,
-        max_length=50
-    )
-    notes: str | None = None
+            if result is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid or inactive payment source",
+                )
+
+            conn.commit()
+
+            return result
 
 
-# --------------------------------------------------
-# Get expenses
-# --------------------------------------------------
+# ---------------------------------
+# Security headers
+# ---------------------------------
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    return response
+
+
+# ---------------------------------
+# API routes
+# ---------------------------------
 
 @app.get("/expenses")
 def get_expenses(
-    username: str = Depends(authenticate)
+    _: bool = Depends(verify_bearer_token),
 ):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                SELECT
-                    expense_id,
-                    transaction_date,
-                    merchant,
-                    description,
-                    amount,
-                    category,
-                    payment_source,
-                    notes,
-                    created_at
-                FROM transactions
-                ORDER BY
-                    transaction_date DESC,
-                    expense_id DESC;
-                """
-            )
-
-            rows = cur.fetchall()
-
-            columns = [
-                "expense_id",
-                "transaction_date",
-                "merchant",
-                "description",
-                "amount",
-                "category",
-                "payment_source",
-                "notes",
-                "created_at",
-            ]
-
-            return [
-                dict(zip(columns, row))
-                for row in rows
-            ]
+    return fetch_expenses()
 
 
-# --------------------------------------------------
-# Create expense
-# --------------------------------------------------
-
-@app.post("/expenses")
-def create_expense(
+@app.post("/expenses", status_code=status.HTTP_201_CREATED)
+def post_expense(
     expense: ExpenseCreate,
-    username: str = Depends(authenticate)
+    _: bool = Depends(verify_bearer_token),
 ):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
+    return create_expense(expense)
 
-            cur.execute(
-                """
-                INSERT INTO transactions (
-                    transaction_date,
-                    merchant,
-                    description,
-                    amount,
-                    category,
-                    payment_source,
-                    notes
-                )
-                VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s
-                )
-                RETURNING expense_id;
-                """,
-                (
-                    expense.transaction_date,
-                    expense.merchant,
-                    expense.description,
-                    expense.amount,
-                    expense.category,
-                    expense.payment_source,
-                    expense.notes,
-                ),
-            )
 
-            expense_id = cur.fetchone()[0]
+# ---------------------------------
+# Web application routes
+# ---------------------------------
 
-        conn.commit()
+@app.get("/app", response_class=HTMLResponse)
+def app_home(
+    request: Request,
+    _: str = Depends(verify_basic_auth),
+):
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={},
+    )
 
-    return {
-        "message": "Expense created successfully",
-        "expense_id": expense_id,
-    }
-
-# --------------------------------------------------
-# GUI expense routes
-# --------------------------------------------------
 
 @app.get("/app/expenses")
-def get_app_expenses():
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    expense_id,
-                    transaction_date,
-                    merchant,
-                    description,
-                    amount,
-                    category,
-                    payment_source,
-                    notes,
-                    created_at
-                FROM transactions
-                ORDER BY
-                    transaction_date DESC,
-                    expense_id DESC;
-                """
-            )
-
-            rows = cur.fetchall()
-
-            columns = [
-                "expense_id",
-                "transaction_date",
-                "merchant",
-                "description",
-                "amount",
-                "category",
-                "payment_source",
-                "notes",
-                "created_at",
-            ]
-
-            return [
-                dict(zip(columns, row))
-                for row in rows
-            ]
+def app_expenses(
+    _: str = Depends(verify_basic_auth),
+):
+    return fetch_expenses()
 
 
 @app.post("/app/expenses")
-def create_app_expense(expense: ExpenseCreate):
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO transactions (
-                    transaction_date,
-                    merchant,
-                    description,
-                    amount,
-                    category,
-                    payment_source,
-                    notes
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s, %s
-                )
-                RETURNING expense_id;
-                """,
-                (
-                    expense.transaction_date,
-                    expense.merchant,
-                    expense.description,
-                    expense.amount,
-                    expense.category,
-                    expense.payment_source,
-                    expense.notes,
-                ),
-            )
+def app_create_expense(
+    expense: ExpenseCreate,
+    _: str = Depends(verify_basic_auth),
+):
+    return create_expense(expense)
 
-            expense_id = cur.fetchone()[0]
 
-        conn.commit()
+@app.get("/app/payment-sources")
+def app_payment_sources(
+    _: str = Depends(verify_basic_auth),
+):
+    return fetch_payment_sources()
 
-    return {
-        "message": "Expense created successfully",
-        "expense_id": expense_id,
-    }
+
+# ---------------------------------
+# Health check
+# ---------------------------------
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
