@@ -81,3 +81,72 @@ FROM (
 JOIN payment_sources AS ps
     ON ps.payment_name = v.card_name
 WHERE ps.payment_type = 'CREDIT_CARD';
+
+-- Analytical view exposing transaction records with payment-source information.
+CREATE OR REPLACE VIEW vw_transactions AS
+SELECT
+    t.expense_id,
+    t.transaction_date,
+    t.merchant,
+    t.description,
+    t.amount,
+    t.category,
+    t.notes,
+    t.created_at,
+    ps.payment_name
+FROM transactions t
+JOIN payment_sources ps
+    ON t.payment_source_id = ps.payment_source_id;
+
+
+-- Analytical view calculating planned monthly credit-card payments.
+CREATE OR REPLACE VIEW vw_monthly_payments AS
+WITH payment_schedule AS (
+    SELECT
+        t.expense_id,
+        t.transaction_date,
+        t.amount,
+        ps.payment_name,
+        cc.statement_day,
+        cc.payment_day,
+
+        CASE
+            WHEN EXTRACT(DAY FROM t.transaction_date) <= cc.statement_day
+                THEN DATE_TRUNC('month', t.transaction_date)
+            ELSE DATE_TRUNC('month', t.transaction_date) + INTERVAL '1 month'
+        END AS statement_month,
+
+        CASE
+            WHEN EXTRACT(DAY FROM t.transaction_date) <= cc.statement_day
+                THEN DATE_TRUNC('month', t.transaction_date) + INTERVAL '1 month'
+            ELSE DATE_TRUNC('month', t.transaction_date) + INTERVAL '2 month'
+        END AS payment_month
+
+    FROM transactions t
+    JOIN payment_sources ps
+        ON t.payment_source_id = ps.payment_source_id
+    JOIN credit_cards cc
+        ON ps.payment_source_id = cc.payment_source_id
+)
+
+SELECT
+    TO_CHAR(payment_month, 'Mon YYYY') AS monthyear,
+    EXTRACT(YEAR FROM payment_month)::INTEGER AS year,
+    EXTRACT(MONTH FROM payment_month)::INTEGER AS month,
+    payment_day,
+
+    MAKE_DATE(
+        EXTRACT(YEAR FROM payment_month)::INTEGER,
+        EXTRACT(MONTH FROM payment_month)::INTEGER,
+        payment_day::INTEGER
+    ) AS payment_due,
+
+    SUM(amount) AS total_payment,
+    COUNT(*) AS transaction_count
+
+FROM payment_schedule
+GROUP BY
+    payment_month,
+    payment_day
+ORDER BY
+    payment_month DESC;

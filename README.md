@@ -17,6 +17,7 @@ The platform currently provides:
 - A web interface for transaction capture
 - A FastAPI backend for request handling and validation
 - PostgreSQL for structured transaction storage
+- PostgreSQL analytical views for reporting and visualization
 - Apache Superset as the analytics layer
 - Application authentication and API authentication
 - A documented data model and system architecture
@@ -38,6 +39,9 @@ FastAPI
 PostgreSQL
      |
      v
+Analytical Views
+     |
+     v
 Apache Superset
 ```
 
@@ -46,7 +50,8 @@ Apache Superset
 1. A transaction is entered through the web application.
 2. FastAPI receives and validates the transaction.
 3. The validated transaction is stored in PostgreSQL.
-4. Apache Superset connects to PostgreSQL for analytics and reporting.
+4. PostgreSQL analytical views provide datasets for analytics and reporting.
+5. Apache Superset connects to PostgreSQL for analytics and reporting.
 
 This separation keeps the transaction capture layer independent from the analytics layer and provides a foundation for future expansion.
 
@@ -78,7 +83,14 @@ Transaction IDs are generated using a PostgreSQL identity column.
 
 Financial amounts use `NUMERIC(12,2)` to preserve decimal precision.
 
-More detail is available in [`docs/data-model.md`](docs/data-model.md).
+PostgreSQL also provides analytical views used by Apache Superset:
+
+- `vw_transactions` — transaction-level dataset enriched with the human-readable payment source name.
+- `vw_monthly_payments` — monthly payment-level dataset used for aggregated payment analysis.
+
+These views are derived from the underlying PostgreSQL data model and provide analytics-oriented datasets without replacing the operational tables.
+
+More detail is available in [`docs/data-model.md`](docs/data-model.md) and [`docs/analytics.md`](docs/analytics.md).
 
 ## Application
 
@@ -128,12 +140,15 @@ requirements.txt        Python dependencies
 
 - [`Architecture`](docs/architecture.md) — system architecture and data flow
 - [`Data Model`](docs/data-model.md) — database structure and design
+- [`Analytics`](docs/analytics.md) — analytical views and Superset dataset usage
 - [`API Documentation`](docs/api.md) — API endpoints and request flow
 - [`Technical Decisions`](docs/technical-decisions.md) — key technology and architecture decisions
 
 ## Current Status
 
 The transaction capture application, PostgreSQL data layer, and Apache Superset analytics layer are operational.
+
+The current implementation includes PostgreSQL analytical views for transaction-level and monthly payment reporting.
 
 The current implementation establishes a reliable foundation for structured financial transaction data and analytics, with the platform designed for future expansion into more advanced financial insights and cash-flow analysis.
 

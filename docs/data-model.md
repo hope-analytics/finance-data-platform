@@ -21,11 +21,13 @@ transactions         credit_cards
 
 `credit_cards` stores credit-card-specific reference information.
 
+PostgreSQL also provides analytical views used by the analytics layer and Apache Superset for transaction-level and payment-level reporting.
+
 ## Entity Relationships
 
 ### Payment Sources → Transactions
 
-One payment source can be associated with many transactions.
+Each transaction references a payment source through `payment_source_id`.
 
 ```text
 payment_sources
@@ -37,19 +39,11 @@ payment_sources
 transactions
 ```
 
-Relationship:
-
-```text
-payment_sources.payment_source_id
-        |
-        +----< transactions.payment_source_id
-```
-
-The transaction table stores the `payment_source_id` foreign key rather than the payment-source name.
+A payment source can therefore be associated with multiple transactions.
 
 ### Payment Sources → Credit Cards
 
-A credit card is associated with a payment source.
+Each credit card references a payment source through `payment_source_id`.
 
 ```text
 payment_sources
@@ -61,159 +55,104 @@ payment_sources
 credit_cards
 ```
 
-Relationship:
-
-```text
-payment_sources.payment_source_id
-        |
-        +----< credit_cards.payment_source_id
-```
-
-This allows a credit card to use the same payment-source reference used by transactions.
+A payment source can therefore be associated with multiple credit-card records.
 
 ## Tables
 
-### `transactions`
+### transactions
 
-Stores individual financial transaction records.
+The `transactions` table stores individual financial transactions.
 
-| Column | Type | Constraints / Purpose |
+| Column | Type | Description |
 |---|---|---|
-| `expense_id` | BIGINT | Primary key, generated identity |
-| `transaction_date` | DATE | Required transaction date |
-| `merchant` | VARCHAR(150) | Required merchant name |
-| `description` | TEXT | Optional transaction description |
-| `amount` | NUMERIC(12,2) | Required financial amount |
-| `category` | VARCHAR(100) | Optional transaction category |
-| `payment_source_id` | BIGINT | Required foreign key to `payment_sources` |
+| `expense_id` | BIGINT | Unique identifier for the transaction |
+| `transaction_date` | DATE | Date the transaction occurred |
+| `merchant` | VARCHAR(255) | Merchant or transaction source |
+| `description` | TEXT | Transaction description |
+| `amount` | NUMERIC(12,2) | Transaction amount |
+| `category` | VARCHAR(100) | Transaction category |
+| `payment_source_id` | BIGINT | References the payment source used |
 | `notes` | TEXT | Optional transaction notes |
 | `created_at` | TIMESTAMP | Record creation timestamp |
 
-### `payment_sources`
+### payment_sources
 
-Stores reusable payment-source reference data.
+The `payment_sources` table stores reusable payment-source reference values.
 
-| Column | Type | Constraints / Purpose |
+| Column | Type | Description |
 |---|---|---|
-| `payment_source_id` | BIGINT | Primary key, generated identity |
-| `payment_name` | VARCHAR(100) | Required and unique payment-source name |
-| `payment_type` | VARCHAR(30) | Required; controlled payment-source type |
-| `active` | BOOLEAN | Indicates whether the source can be used |
-| `created_at` | TIMESTAMP | Record creation timestamp |
+| `payment_source_id` | BIGINT | Unique identifier for the payment source |
+| `payment_name` | VARCHAR(100) | Name of the payment source |
+| `payment_type` | VARCHAR(50) | Type of payment source |
+| `is_active` | BOOLEAN | Indicates whether the payment source is active |
 
-Current supported payment types are:
+Supported payment types and reference values are maintained in this table.
 
-- `CASH`
-- `E_WALLET`
-- `BANK_ACCOUNT`
-- `DEBIT_CARD`
-- `CREDIT_CARD`
-- `BNPL`
-- `OTHER`
+### credit_cards
 
-Current reference values include:
+The `credit_cards` table stores credit-card-specific reference information.
 
-| Payment Source | Type |
-|---|---|
-| BPI - Amore Cashback | CREDIT_CARD |
-| UB - Rewards | CREDIT_CARD |
-| UB - Platinum | CREDIT_CARD |
-| Cash | CASH |
-| Gcash | E_WALLET |
-
-### `credit_cards`
-
-Stores credit-card-specific reference information.
-
-| Column | Type | Constraints / Purpose |
+| Column | Type | Description |
 |---|---|---|
-| `credit_card_id` | BIGINT | Primary key, generated identity |
-| `card_name` | VARCHAR(100) | Required and unique card name |
-| `statement_day` | SMALLINT | Required; day from 1 to 31 |
-| `payment_day` | SMALLINT | Required; planned payment day of 1 or 15 |
-| `active` | BOOLEAN | Indicates whether the card is active |
-| `created_at` | TIMESTAMP | Record creation timestamp |
-| `payment_source_id` | BIGINT | Required foreign key to `payment_sources` |
+| `credit_card_id` | BIGINT | Unique identifier for the credit card |
+| `payment_source_id` | BIGINT | References the associated payment source |
+| `card_name` | VARCHAR(100) | Name or identifier for the credit card |
+| `statement_day` | INTEGER | Day of the month used as the statement cutoff |
+| `payment_day` | INTEGER | Planned payment day for the credit card |
 
-### Credit Card Payment Day
+### Analytical Views
 
-The `payment_day` field represents the user's planned payment and cash-flow marker.
+The PostgreSQL analytical layer provides views for reporting and visualization. These views do not replace the core tables; they provide reporting-oriented representations of the underlying transaction data.
 
-It is intentionally separate from the bank's contractual payment due date.
+#### `vw_transactions`
 
-The current application supports:
+`vw_transactions` provides a transaction-level analytical dataset based on `transactions` joined with `payment_sources`.
 
-- `1` — planned payment on the 1st
-- `15` — planned payment on the 15th
+- **Grain:** One row per transaction
+- **Source tables:** `transactions`, `payment_sources`
+- **Purpose:** Provides transaction records with the associated payment source name for analytical use
+- **Output:** Transaction fields from `transactions` plus `payment_name` from `payment_sources`
+- **Usage:** Used by Apache Superset for transaction-level visualizations
 
-This field is intended to support future cash-flow planning without changing individual transaction records.
+#### `vw_monthly_payments`
+
+`vw_monthly_payments` provides an aggregated payment-level analytical dataset based on transaction, payment-source, and credit-card data.
+
+- **Grain:** One row per payment month and payment day
+- **Source tables:** `transactions`, `payment_sources`, `credit_cards`
+- **Purpose:** Provides monthly payment totals and transaction counts for reporting
+- **Transformation:** Determines the statement month from the transaction date and credit-card statement day, then derives the corresponding payment month
+- **Output:** Payment month, year, month, payment day, payment due date, total payment, and transaction count
+- **Usage:** Used by Apache Superset for monthly payment reporting
+
+The analytical views are maintained separately from the core table definitions and are intended to provide stable datasets for the analytics layer.
 
 ## Referential Integrity
 
-Foreign-key relationships enforce valid references between the tables.
+The database enforces referential integrity between the core tables through foreign-key relationships.
 
-### Transactions
+- `transactions.payment_source_id` references `payment_sources.payment_source_id`.
+- `credit_cards.payment_source_id` references `payment_sources.payment_source_id`.
 
-```text
-transactions.payment_source_id
-        |
-        v
-payment_sources.payment_source_id
-```
-
-A transaction must reference an existing payment-source record.
-
-### Credit Cards
-
-```text
-credit_cards.payment_source_id
-        |
-        v
-payment_sources.payment_source_id
-```
-
-A credit-card record must reference an existing payment-source record.
+These relationships ensure that transaction and credit-card records reference valid payment-source records.
 
 ## Design Decisions
 
 ### Separate Payment Sources from Transactions
 
-Payment-source information is stored in a reference table rather than repeated as text in every transaction.
+Payment-source information is stored separately from transactions to avoid repeating reference values and to allow payment-source metadata to be maintained independently.
 
-This provides:
+### Separate Credit Card Information
 
-- Consistent payment-source naming
-- Controlled payment types
-- Referential integrity
-- Easier maintenance of payment-source metadata
+Credit-card-specific attributes are stored separately from general payment-source information because not all payment sources are credit cards.
 
-### Separate Credit-Card Data
+### Preserve Transaction-Level Records
 
-Credit-card-specific attributes are stored in `credit_cards` rather than directly in `transactions`.
+The `transactions` table remains the operational source of transaction records. Analytical views provide reporting-oriented representations without replacing the underlying transaction data.
 
-This keeps transaction records focused on individual purchases while allowing card-level information such as statement and planned payment days to be managed independently.
+### Analytical Views for Reporting
 
-### Planned Payment Day vs. Contractual Due Date
-
-The model intentionally uses `payment_day` rather than `due_date`.
-
-`payment_day` represents the user's planned payment schedule for cash-flow planning. It should not be interpreted as the bank's contractual due date.
-
-### Transaction Amount
-
-Financial amounts are stored using:
-
-```text
-NUMERIC(12,2)
-```
-
-This preserves two decimal places for financial calculations and avoids floating-point representation issues.
-
-### Generated Identifiers
-
-Primary keys use PostgreSQL identity columns.
-
-This allows PostgreSQL to generate unique identifiers for transactions and reference records.
+Analytical views are used to provide stable, purpose-specific datasets for reporting and visualization while keeping analytical transformations separate from the operational transaction table.
 
 ## Current Scope
 
@@ -225,13 +164,13 @@ The current data model supports:
 - Transaction-to-payment-source relationships
 - Credit-card-to-payment-source relationships
 - Planned payment-day information
+- Transaction-level analytical reporting through `vw_transactions`
+- Monthly payment reporting through `vw_monthly_payments`
 
-The model does not currently implement:
+The current data model does not currently implement:
 
 - Credit-card statement records
 - Automated contractual due-date calculations
 - Cash-flow forecasting
 - Installment schedules
 - Automated payment allocation
-
-These can be introduced as separate capabilities in future development without changing the core transaction structure.

@@ -26,16 +26,24 @@ FastAPI
   v
 PostgreSQL
   |
-  +-- transactions
-  |       |
-  |       +-- payment_source_id
-  |                |
-  |                v
-  |         payment_sources
+  +-- Operational Tables
+  |     |
+  |     +-- transactions
+  |     |       |
+  |     |       +-- payment_source_id
+  |     |                |
+  |     |                v
+  |     |         payment_sources
+  |     |
+  |     +-- credit_cards
   |
-  +-- credit_cards
-  |
-  v
+  +-- Analytical Views
+        |
+        +-- vw_transactions
+        |
+        +-- vw_monthly_payments
+        |
+        v
 Apache Superset
 (Analytics & Reporting)
 ```
@@ -49,7 +57,8 @@ Apache Superset
 5. The transaction is stored in the `transactions` table.
 6. Each transaction references a record in `payment_sources` through `payment_source_id`.
 7. Credit-card-specific information is maintained separately in the `credit_cards` reference table.
-8. Apache Superset connects to PostgreSQL and uses the stored transaction data for analytics and reporting.
+8. PostgreSQL analytical views provide datasets for analytics and reporting.
+9. Apache Superset connects to PostgreSQL and uses the analytical views for analytics and reporting.
 
 ## Application Layer
 
@@ -132,13 +141,27 @@ The `payment_day` represents the planned payment and cash-flow marker used by th
 
 This separation allows credit-card-specific payment timing to be maintained independently from individual transaction records.
 
+### Analytical Views
+
+PostgreSQL also provides analytical views used by Apache Superset.
+
+- `vw_transactions` provides transaction-level data enriched with the user-visible `payment_name` from `payment_sources`.
+- `vw_monthly_payments` provides aggregated monthly payment data based on transaction, payment-source, and credit-card information.
+
+These views are derived from the operational database tables and provide datasets for analytical reporting without replacing the underlying transaction records.
+
 ## Analytics Layer
 
 Apache Superset serves as the analytics and reporting layer.
 
 Superset connects directly to PostgreSQL rather than to the web application. This separates operational transaction capture from analytical reporting.
 
-PostgreSQL acts as the centralized source of transaction data for the analytics layer.
+PostgreSQL provides analytical views that are consumed by Superset:
+
+- `vw_transactions` for transaction-level analytics and reporting
+- `vw_monthly_payments` for monthly payment analysis
+
+The analytical views provide purpose-specific datasets while PostgreSQL remains the centralized source of transaction data for the analytics layer.
 
 ## Security
 
