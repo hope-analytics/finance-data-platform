@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
@@ -9,6 +10,8 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+
+load_dotenv("/Users/hopey/household-expenses/.env")
 from psycopg2 import connect
 from psycopg2.extras import RealDictCursor
 
@@ -17,7 +20,7 @@ from psycopg2.extras import RealDictCursor
 # Configuration
 # ---------------------------------
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 APP_USERNAME = os.getenv("APP_USERNAME")
 APP_PASSWORD = os.getenv("APP_PASSWORD")
 API_TOKEN = os.getenv("API_TOKEN")
@@ -70,7 +73,7 @@ class ExpenseCreate(BaseModel):
     category: Optional[str] = None
     payment_source_id: int
     notes: Optional[str] = None
-
+    installment_count: Optional[int] = Field(default=None, ge=2)
 
 # ---------------------------------
 # Authentication
@@ -195,20 +198,49 @@ def create_expense(expense: ExpenseCreate):
     )
 
     with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(query, values)
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, values)
 
-            result = cursor.fetchone()
+                result = cursor.fetchone()
 
-            if result is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid or inactive payment source",
-                )
+                if result is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid or inactive payment source",
+                    )
+
+                result = dict(result)
+
+                if expense.installment_count is not None:
+                    cursor.execute(
+                        """
+                        SELECT create_installment_plan(
+                            %s::BIGINT,
+                            %s::SMALLINT
+                        ) AS plan_id
+                        """,
+                        (
+                            result["expense_id"],
+                            expense.installment_count,
+                        ),
+                    )
+
+                    installment_result = cursor.fetchone()
+                    
+                    result["installment_plan_id"] = installment_result["plan_id"]
 
             conn.commit()
 
             return result
+
+        except HTTPException:
+            conn.rollback()
+            raise
+        
+        except Exception as exc:
+            conn.rollback()
+            raise
 
 
 # ---------------------------------

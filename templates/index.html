@@ -89,6 +89,28 @@
                     >
                 </div>
 
+                <!-- Installments -->
+                <div
+                    class="form-group"
+                    id="installmentGroup"
+                    hidden
+                >
+                    <label for="installment_count">
+                        Installments
+                        <span class="optional">(optional)</span>
+                    </label>
+
+                    <input
+                        type="number"
+                        id="installment_count"
+                        name="installment_count"
+                        min="2"
+                        step="1"
+                        placeholder="e.g. 6"
+                        inputmode="numeric"
+                    >
+                </div>
+
                 <!-- Category -->
                 <div class="form-group">
                     <label for="category">Category</label>

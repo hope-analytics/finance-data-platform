@@ -5,6 +5,10 @@ const expensesContainer = document.getElementById("expensesContainer");
 const refreshButton = document.getElementById("refreshButton");
 const paymentOptionsContainer = document.getElementById("paymentOptions");
 const paymentSourceId = document.getElementById("payment_source_id");
+const installmentGroup = document.getElementById("installmentGroup");
+const installmentCount = document.getElementById("installment_count");
+
+let selectedPaymentType = null;
 
 // ---------------------------------
 // Set today's date
@@ -19,6 +23,22 @@ function setToday() {
 
     document.getElementById("transaction_date").value =
         `${year}-${month}-${day}`;
+}
+
+// ---------------------------------
+// Installment visibility
+// ---------------------------------
+
+function updateInstallmentVisibility() {
+
+    const isCreditCard =
+        selectedPaymentType === "CREDIT_CARD";
+
+    installmentGroup.hidden = !isCreditCard;
+
+    if (!isCreditCard) {
+        installmentCount.value = "";
+    }
 }
 
 // ---------------------------------
@@ -226,6 +246,14 @@ form.addEventListener("submit", async function(event) {
             document.getElementById("notes").value.trim() || null
     };
 
+    if (
+        selectedPaymentType === "CREDIT_CARD" &&
+        installmentCount.value
+    ) {
+        expense.installment_count =
+            Number(installmentCount.value);
+    }
+
     try {
 
         const response = await fetch("/app/expenses", {
@@ -242,8 +270,6 @@ form.addEventListener("submit", async function(event) {
         const data = await parseResponse(response);
 
         if (!response.ok) {
-
-            const data = await parseResponse(response);
 
             throw new Error(
                 data.detail || "Failed to save expense"
@@ -266,6 +292,12 @@ form.addEventListener("submit", async function(event) {
         paymentOptionsContainer
             .querySelectorAll(".payment-option")
             .forEach(option => option.classList.remove("selected"));
+
+        selectedPaymentType = null;
+
+        installmentCount.value = "";
+            
+        updateInstallmentVisibility();
 
         // Put cursor back on merchant
         document.getElementById("merchant").focus();
@@ -346,6 +378,9 @@ async function loadPaymentSources() {
 
                 paymentSourceId.value = source.payment_source_id;
 
+                selectedPaymentType = source.payment_type;
+                updateInstallmentVisibility();
+
                 paymentOptionsContainer
                     .querySelectorAll(".payment-option")
                     .forEach(option => {
@@ -355,6 +390,7 @@ async function loadPaymentSources() {
 
                 button.classList.add("selected");
                 button.setAttribute("aria-pressed", "true");
+
             });
 
             paymentOptionsContainer.appendChild(button);

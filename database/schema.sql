@@ -82,64 +82,7 @@ JOIN payment_sources AS ps
     ON ps.payment_name = v.card_name
 WHERE ps.payment_type = 'CREDIT_CARD';
 
--- Analytical view exposing transaction records with payment-source information.
-CREATE OR REPLACE VIEW vw_transactions AS
-SELECT
-    t.expense_id,
-    t.transaction_date,
-    t.merchant,
-    t.description,
-    t.amount,
-    t.category,
-    t.notes,
-    t.created_at,
-    ps.payment_name
-FROM transactions t
-JOIN payment_sources ps
-    ON t.payment_source_id = ps.payment_source_id;
-
-
--- Analytical view calculating planned monthly credit-card payments.
-CREATE OR REPLACE VIEW vw_monthly_payments AS
-SELECT
-    TO_CHAR(DATE_TRUNC('month', po.payment_due), 'Mon YYYY') AS monthyear,
-    EXTRACT(YEAR FROM po.payment_due)::INTEGER AS year,
-    EXTRACT(MONTH FROM po.payment_due)::INTEGER AS month,
-    cc.payment_day,
-    po.payment_due,
-    SUM(po.payment_amount) AS total_payment,
-    COUNT(*) AS transaction_count
-FROM payment_obligations AS po
-JOIN credit_cards AS cc
-    ON cc.payment_source_id = po.payment_source_id
-GROUP BY
-    DATE_TRUNC('month', po.payment_due),
-    cc.payment_day,
-    po.payment_due
-ORDER BY
-    po.payment_due DESC;
-
-SELECT
-    TO_CHAR(payment_month, 'Mon YYYY') AS monthyear,
-    EXTRACT(YEAR FROM payment_month)::INTEGER AS year,
-    EXTRACT(MONTH FROM payment_month)::INTEGER AS month,
-    payment_day,
-
-    MAKE_DATE(
-        EXTRACT(YEAR FROM payment_month)::INTEGER,
-        EXTRACT(MONTH FROM payment_month)::INTEGER,
-        payment_day::INTEGER
-    ) AS payment_due,
-
-    SUM(amount) AS total_payment,
-    COUNT(*) AS transaction_count
-
-FROM payment_schedule
-GROUP BY
-    payment_month,
-    payment_day
-ORDER BY
-    payment_month DESC;
+-- Installment plan for applicable payment source
 
 CREATE TABLE installment_plans (
     plan_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -156,6 +99,8 @@ CREATE TABLE installment_plans (
         UNIQUE (expense_id)
 );
 
+-- Installment schedule for transactions with installment plan
+
 CREATE TABLE installment_schedule (
     schedule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     plan_id BIGINT NOT NULL,
@@ -171,6 +116,8 @@ CREATE TABLE installment_schedule (
     CONSTRAINT installment_schedule_plan_number_unique
         UNIQUE (plan_id, installment_number)
 );
+
+-- Payment due function
 
 CREATE OR REPLACE FUNCTION calculate_payment_due(
     p_transaction_date DATE,
@@ -202,6 +149,8 @@ AS $$
     );
 $$;
 
+-- Installment plan function
+
 CREATE OR REPLACE FUNCTION create_installment_plan(
     p_expense_id BIGINT,
     p_installment_count SMALLINT
@@ -222,18 +171,17 @@ DECLARE
     v_previous_total NUMERIC(12,2);
     v_installment_number SMALLINT;
 BEGIN
-    /*
-     * Validate installment count.
-     */
+    
+    -- Validate installment count.
+
     IF p_installment_count IS NULL OR p_installment_count < 2 THEN
         RAISE EXCEPTION
             'installment_count must be at least 2; received %',
             p_installment_count;
     END IF;
 
-    /*
-     * Lock the source transaction and read its authoritative amount.
-     */
+    -- Lock the source transaction and read its authoritative amount.
+
     SELECT
         t.amount,
         t.payment_source_id,
@@ -254,21 +202,17 @@ BEGIN
             p_expense_id;
     END IF;
 
-    /*
-     * Installments are credit-card only.
-     */
+    -- Installments are credit-card only.
+
     IF v_payment_type <> 'CREDIT_CARD' THEN
         RAISE EXCEPTION
             'Transaction % is not a credit-card transaction',
             p_expense_id;
     END IF;
 
-    /*
-     * Retrieve the credit-card payment-cycle configuration.
-     *
-     * The current model expects the payment source to resolve
-     * to one credit-card configuration.
-     */
+    -- Retrieve the credit-card payment-cycle configuration.
+    -- The current model expects the payment source to resolve to one credit-card configuration.
+
     SELECT
         cc.statement_day,
         cc.payment_day
@@ -278,9 +222,8 @@ BEGIN
     FROM credit_cards AS cc
     WHERE cc.payment_source_id = v_payment_source_id;
 
-    /*
-     * Prevent duplicate installment plans.
-     */
+    -- Prevent duplicate installment plans.
+
     IF EXISTS (
         SELECT 1
         FROM installment_plans AS ip
@@ -291,9 +234,8 @@ BEGIN
             p_expense_id;
     END IF;
 
-    /*
-     * The source transaction amount is authoritative.
-     */
+    -- The source transaction amount is authoritative.
+
     INSERT INTO installment_plans (
         expense_id,
         original_amount,
@@ -307,9 +249,8 @@ BEGIN
     RETURNING plan_id
     INTO v_plan_id;
 
-    /*
-     * First installment uses the single payment-cycle authority.
-     */
+    -- First installment uses the single payment-cycle authority.
+
     v_first_payment_due := calculate_payment_due(
         (
             SELECT transaction_date
@@ -320,17 +261,15 @@ BEGIN
         v_payment_day
     );
 
-    /*
-     * Deterministic monetary allocation.
-     */
+    -- Deterministic monetary allocation.
+
     v_base_amount := TRUNC(
         v_amount / p_installment_count,
         2
     );
 
-    /*
-     * Generate installments 1 through N-1.
-     */
+    --Generate installments 1 through N-1.
+    
     FOR v_installment_number IN 1..(p_installment_count - 1)
     LOOP
         INSERT INTO installment_schedule (
@@ -348,9 +287,8 @@ BEGIN
         );
     END LOOP;
 
-    /*
-     * Calculate the exact remaining amount for the final installment.
-     */
+    -- Calculate the exact remaining amount for the final installment.
+
     SELECT COALESCE(SUM(amount), 0)
     INTO v_previous_total
     FROM installment_schedule
@@ -372,9 +310,8 @@ BEGIN
             + ((p_installment_count - 1) * INTERVAL '1 month')
     );
 
-    /*
-     * Final reconciliation.
-     */
+    -- Final reconciliation.
+    
     SELECT COALESCE(SUM(amount), 0)
     INTO v_previous_total
     FROM installment_schedule
@@ -388,9 +325,8 @@ BEGIN
             v_amount;
     END IF;
 
-    /*
-     * Validate schedule cardinality.
-     */
+    -- Validate schedule cardinality.
+    
     IF (
         SELECT COUNT(*)
         FROM installment_schedule
@@ -410,6 +346,7 @@ CREATE OR REPLACE VIEW payment_obligations AS
 -- Normal credit-card transactions:
 -- one obligation for the full transaction amount,
 -- but only when no installment plan exists.
+
 SELECT
     t.expense_id,
     t.payment_source_id,
@@ -438,6 +375,7 @@ UNION ALL
 
 -- Installment transactions:
 -- obligations come exclusively from the installment schedule.
+
 SELECT
     ip.expense_id,
     t.payment_source_id,
@@ -451,3 +389,41 @@ JOIN transactions AS t
     ON t.expense_id = ip.expense_id
 JOIN installment_schedule AS s
     ON s.plan_id = ip.plan_id;
+
+-- Analytical view exposing transaction records with payment-source information.
+
+CREATE OR REPLACE VIEW vw_transactions AS
+SELECT
+    t.expense_id,
+    t.transaction_date,
+    t.merchant,
+    t.description,
+    t.amount,
+    t.category,
+    t.notes,
+    t.created_at,
+    ps.payment_name
+FROM transactions t
+JOIN payment_sources ps
+    ON t.payment_source_id = ps.payment_source_id;
+
+-- Analytical view calculating planned monthly credit-card payments.
+
+CREATE OR REPLACE VIEW vw_monthly_payments AS
+SELECT
+    TO_CHAR(DATE_TRUNC('month', po.payment_due), 'Mon YYYY') AS monthyear,
+    EXTRACT(YEAR FROM po.payment_due)::INTEGER AS year,
+    EXTRACT(MONTH FROM po.payment_due)::INTEGER AS month,
+    cc.payment_day,
+    po.payment_due,
+    SUM(po.payment_amount) AS total_payment,
+    COUNT(*) AS transaction_count
+FROM payment_obligations AS po
+JOIN credit_cards AS cc
+    ON cc.payment_source_id = po.payment_source_id
+GROUP BY
+    DATE_TRUNC('month', po.payment_due),
+    cc.payment_day,
+    po.payment_due
+ORDER BY
+    po.payment_due DESC;

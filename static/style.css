@@ -292,3 +292,11 @@ textarea {
         grid-template-columns: 1fr;
     }
 }
+
+/* ---------------------------------
+   Hidden elements
+   --------------------------------- */
+
+   [hidden] {
+    display: none !important;
+}
