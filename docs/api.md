@@ -6,6 +6,8 @@ The Finance Data Platform exposes a FastAPI backend for transaction capture and 
 
 The API accepts JSON requests from the web application and persists validated transaction data in PostgreSQL.
 
+The transaction creation API also supports optional credit-card installment creation.
+
 ## Base URL
 
 When running locally:
@@ -17,7 +19,7 @@ http://<TAIL_SCALE_IP>:8000
 For LAN access from another device:
 
 ```text
-http://<SERVER_IP>>:8000
+http://<SERVER_IP>:8000
 ```
 
 The application must be running and accessible on the network before using the LAN address.
@@ -36,13 +38,15 @@ The route is protected using HTTP Basic authentication.
 
 Returns recent transaction records for display in the web application.
 
-The response includes transaction details and the associated payment-source name.
+The response includes transaction details and the associated payment-source information, including `payment_name`.
 
 #### `POST /app/expenses`
 
 Creates a new transaction from the web application.
 
 The request is validated before the transaction is inserted into PostgreSQL.
+
+The endpoint also supports optional installment creation for eligible credit-card transactions.
 
 Example request:
 
@@ -58,19 +62,27 @@ Example request:
 }
 ```
 
-The `payment_source_id` must reference an active record in the `payment_sources` table.
+A credit-card transaction may optionally include:
 
-A successful request returns the created transaction as JSON.
+```json
+{
+  "installment_count": 6
+}
+```
 
-### API Endpoints
+The `payment_source_id` must reference an active payment source.
 
-#### `GET /expenses`
+## API Endpoints
+
+### `GET /expenses`
 
 Returns transaction records through the API.
 
 The endpoint uses bearer-token verification.
 
-#### `POST /expenses`
+The retrieval response includes transaction information and the associated payment-source information.
+
+### `POST /expenses`
 
 Creates a transaction through the API.
 
@@ -83,12 +95,22 @@ Example request:
   "transaction_date": "2026-09-12",
   "merchant": "Example Store",
   "description": "Household supplies",
-  "amount": 500.00,
-  "category": "Household",
+  "amount": 5000.00,
+  "category": "Shopping",
   "payment_source_id": 4,
-  "notes": "Example transaction"
+  "notes": "Example transaction",
+  "installment_count": 6
 }
 ```
+
+`installment_count` is optional.
+
+When provided:
+
+- it must be at least `2`;
+- the selected payment source must resolve to an eligible credit-card transaction;
+- the database creates the installment plan and schedule;
+- the original transaction remains the spending record.
 
 ## Request Validation
 
@@ -99,6 +121,10 @@ Validation covers the expected transaction fields and data types.
 The transaction amount is represented as a decimal value and stored in PostgreSQL using `NUMERIC(12,2)`.
 
 The payment source is represented by `payment_source_id` rather than a free-text payment-source name.
+
+The optional `installment_count` field must be an integer greater than or equal to `2` when supplied.
+
+Credit-card eligibility and installment creation are controlled by the database implementation.
 
 ## Payment Sources
 
@@ -127,11 +153,15 @@ Only active payment sources can be assigned to new transactions.
 
 ## Response Data
 
-Transaction responses include the stored transaction fields and the user-visible payment-source information.
+### Transaction Creation Response
 
-The payment-source name is obtained by joining the transaction to the `payment_sources` reference table.
+The POST transaction-creation response returns the inserted transaction fields.
 
-Example response:
+When installment creation occurs, the response additionally includes `installment_plan_id`.
+
+The POST creation response does not include `payment_name`.
+
+Example:
 
 ```json
 {
@@ -139,18 +169,133 @@ Example response:
   "transaction_date": "2026-09-12",
   "merchant": "Example Store",
   "description": "Household supplies",
-  "amount": 500.00,
-  "category": "Household",
+  "amount": 5000.00,
+  "category": "Shopping",
   "payment_source_id": 4,
-  "payment_name": "Cash",
+  "notes": "Example transaction",
+  "created_at": "2026-09-12T23:00:00",
+  "installment_plan_id": 12
+}
+```
+
+For a transaction without installments, `installment_plan_id` is not returned as an installment-plan identifier.
+
+### Transaction Retrieval Response
+
+Transaction retrieval endpoints provide transaction information together with the associated payment-source information.
+
+The retrieval response can include `payment_name`.
+
+Example:
+
+```json
+{
+  "expense_id": 1,
+  "transaction_date": "2026-09-12",
+  "merchant": "Example Store",
+  "description": "Household supplies",
+  "amount": 5000.00,
+  "category": "Shopping",
+  "payment_source_id": 4,
+  "payment_name": "Credit Card",
   "notes": "Example transaction",
   "created_at": "2026-09-12T23:00:00"
 }
 ```
 
+The creation and retrieval response contracts should therefore be treated separately.
+
+## Installment Creation Flow
+
+When a transaction is submitted with an `installment_count`, the application follows this flow:
+
+```text
+Client
+  |
+  v
+FastAPI
+  |
+  +-- Validate request
+  |
+  +-- Insert original transaction
+  |
+  +-- Call create_installment_plan()
+  |
+  v
+PostgreSQL
+  |
+  +-- Validate installment requirements
+  +-- Resolve credit-card eligibility
+  +-- Read authoritative transaction amount
+  +-- Resolve credit-card configuration
+  +-- Create installment plan
+  +-- Generate installment schedule
+  +-- Reconcile schedule to original amount
+  +-- Validate installment count
+  |
+  v
+Return response
+  |
+  v
+Commit
+```
+
+The original transaction and installment-plan creation occur within the same database transaction.
+
+If installment creation fails, the transaction is rolled back.
+
+FastAPI does not independently calculate:
+
+- installment amounts;
+- installment payment dates;
+- schedule allocation;
+- payment-obligation aggregation.
+
+These responsibilities remain within the database implementation.
+
+## Database Interaction
+
+The FastAPI application connects to PostgreSQL using environment-based configuration.
+
+The application does not expose PostgreSQL directly to clients.
+
+For normal transactions, the workflow is:
+
+```text
+Client
+  |
+  v
+FastAPI
+  |
+  +-- Validate request
+  |
+  +-- Validate payment_source_id
+  |
+  v
+PostgreSQL
+  |
+  v
+transactions
+```
+
+For installment transactions, the workflow extends to the database-controlled installment process:
+
+```text
+transactions
+      |
+      v
+create_installment_plan()
+      |
+      +-- installment_plans
+      |
+      +-- installment_schedule
+```
+
+The database remains responsible for the authoritative transaction amount, credit-card eligibility, payment-date calculation, schedule allocation, and schedule reconciliation.
+
 ## Authentication
 
-The application uses two authentication mechanisms for different API surfaces:
+The application uses two authentication mechanisms for different API surfaces.
 
 ### HTTP Basic Authentication
 
@@ -192,32 +337,7 @@ Typical status codes include:
 | `422` | Request validation failed |
 | `500` | Internal application or database error |
 
-## Database Interaction
-
-The FastAPI application connects to PostgreSQL using environment-based configuration.
-
-The application does not expose PostgreSQL directly to clients.
-
-The transaction workflow is:
-
-```text
-Client
-  |
-  v
-FastAPI
-  |
-  +-- Validate request
-  |
-  +-- Validate payment_source_id
-  |
-  v
-PostgreSQL
-  |
-  v
-transactions
-```
-
-The application uses the `payment_sources` table to resolve the selected payment source and store its identifier in the transaction record.
+When installment creation fails during transaction creation, the database transaction is rolled back.
 
 ## Security Considerations
 
@@ -232,8 +352,19 @@ The application follows these practices:
 
 ## Current Scope
 
-The API currently focuses on transaction capture and retrieval.
+The API currently supports:
 
-The platform does not yet implement a dedicated cash-flow engine or automated credit-card payment calculations.
+- Transaction creation
+- Transaction retrieval
+- Active payment-source validation
+- Optional credit-card installment creation
+- Database-controlled installment schedule generation
+- Transactional rollback when installment creation fails
 
-Credit-card reference data is stored separately and can be used by future application features.
+The current V1 API does not implement:
+
+- Generalized interest or amortization calculations
+- Installment refunds or cancellation
+- Installment modification
+- Automatic historical conversion of existing transactions
+- Cash-flow forecasting
