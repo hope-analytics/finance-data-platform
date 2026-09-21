@@ -1,6 +1,6 @@
 # Finance Data Platform
 
-A self-hosted financial data platform for capturing, storing, and analyzing transaction data.
+A self-hosted **household financial data platform** for capturing, storing, modeling, and analyzing financial transaction data using PostgreSQL, FastAPI/Python, SQL, and Apache Superset.
 
 ## Why I Built This
 
@@ -12,20 +12,35 @@ The goal is to create a simple but extensible foundation where transaction data 
 
 Apache Superset is the current reporting and visualization platform for the project.
 
+## Project Snapshot
+
+| Area | Implementation |
+|---|---|
+| Purpose | Household financial data capture, modeling, and analytics |
+| Architecture | Web Application → FastAPI → PostgreSQL → Analytical Views → Apache Superset |
+| Primary Database | PostgreSQL |
+| Backend | Python / FastAPI |
+| Frontend | HTML / CSS / JavaScript |
+| Analytics & Visualization | Apache Superset |
+| Current Milestone | V1 Credit-Card Installments implemented and verified |
+
 ## What I Built
 
 The platform currently provides:
 
 - A web interface for transaction capture
 - A FastAPI backend for request handling and validation
-- PostgreSQL for structured transaction storage
+- PostgreSQL as the structured data layer and source of truth
+- Relational data modeling for transactions, payment sources, credit cards, and installment relationships
 - Optional credit-card installment scheduling
 - Database-controlled installment payment-date and allocation logic
-- A credit-card payment-level semantic layer
+- A credit-card payment-level semantic layer for payment-oriented analytics
 - PostgreSQL analytical views for reporting and visualization
 - Apache Superset as the current reporting and visualization platform
 - Application authentication and API authentication
-- A documented data model and system architecture
+- A documented data model, system architecture, API, analytics layer, and technical decisions
+
+The project demonstrates practical implementation across **data modeling, backend/API development, financial-domain business logic, data integrity, analytical modeling, and reporting/visualization**.
 
 ## Architecture
 
@@ -79,7 +94,7 @@ PostgreSQL
 
 The original transaction remains the source of truth for the spending event. Installment records represent derived payment obligations rather than additional purchases.
 
-Apache Superset is the current reporting and visualization platform. Power BI is not part of the current reporting and visualization architecture.
+Apache Superset is the current reporting and visualization platform.
 
 ## Technology Stack
 
@@ -116,9 +131,11 @@ The analytical views provide reporting-oriented datasets without replacing the o
 
 ## Credit-Card Installments
 
-The current V1 implementation supports optional credit-card installments.
+The V1 Credit-Card Installments implementation is the project's primary example of financial-domain business logic and database-controlled processing.
 
-The design preserves the original transaction as the single spending event:
+The platform supports optional 0% credit-card installment plans while preserving the original purchase as the spending source of truth and deriving installment payment obligations separately.
+
+The design follows this flow:
 
 ```text
 Original Transaction
@@ -131,6 +148,9 @@ Installment Schedule
         |
         v
 Payment Obligations
+        |
+        v
+Monthly Payment Analytics
 ```
 
 The database controls:
@@ -216,6 +236,22 @@ PostgreSQL
     Reporting & Visualization
 ```
 
+### Project Screenshots
+
+The repository includes screenshots of the implemented application and reporting layers.
+
+#### Web Application
+
+![Web Application](screenshots/Web-Application.png)
+
+#### Financial Intelligence Dashboard
+
+![Financial Intelligence Dashboard](screenshots/Financial-Intelligence-Dashboard.jpg)
+
+#### FastAPI Application
+
+![FastAPI Application](screenshots/FastAPI.png)
+
 See [`docs/analytics.md`](docs/analytics.md) for the analytical view contracts and current Superset dataset mapping.
 
 ## Security & Data Handling
@@ -240,6 +276,7 @@ app/                    FastAPI application
 database/               Database schema and database logic
 static/                 Frontend JavaScript and CSS
 templates/              HTML templates
+screenshots/            Application and reporting screenshots
 docs/                   Architecture and technical documentation
 requirements.txt        Python dependencies
 .env.example            Example environment configuration
@@ -255,7 +292,7 @@ requirements.txt        Python dependencies
 
 ## Current Status
 
-The transaction capture application, PostgreSQL data layer, credit-card installment functionality, and Apache Superset reporting and visualization layer are operational.
+The V1 Credit-Card Installments implementation has been completed and verified. The application, PostgreSQL data layer, payment-obligation semantics, analytical views, and Apache Superset reporting and visualization layer are operational.
 
 The current implementation includes:
 
@@ -266,6 +303,8 @@ The current implementation includes:
 - Transaction-level analytical reporting
 - Monthly credit-card payment reporting
 - Apache Superset visualization
+
+The implementation and supporting technical documentation have been integrated into `main`.
 
 The platform provides a foundation for structured financial transaction data and payment-level analytics while remaining extensible for future financial use cases.
 
