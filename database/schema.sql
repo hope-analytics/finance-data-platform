@@ -47,9 +47,15 @@ CREATE TABLE transactions (
     payment_source_id BIGINT NOT NULL,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    category_id BIGINT,
+    
     CONSTRAINT transactions_payment_source_fk
         FOREIGN KEY (payment_source_id)
-        REFERENCES payment_sources(payment_source_id)
+        REFERENCES payment_sources(payment_source_id),
+    
+    CONSTRAINT transactions_category_fk
+        FOREIGN KEY (category_id)
+        REFERENCES category_table (category_id)
 );
 
 -- Reference values currently used by the application.
@@ -427,3 +433,64 @@ GROUP BY
     po.payment_due
 ORDER BY
     po.payment_due DESC;
+
+CREATE TABLE transaction_category (
+    category_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    category_name VARCHAR(100) NOT NULL,
+    CONSTRAINT category_table_name_unique UNIQUE (category_name)
+);
+
+INSERT INTO category_table (category_name)
+VALUES
+    ('Home'),
+    ('Clothing'),
+    ('Motor Maintenance'),
+    ('Food & Groceries'),
+    ('Transportation'),
+    ('Housing'),
+    ('Entertainment'),
+    ('Needs'),
+    ('Investment');
+
+CREATE OR REPLACE VIEW vw_transaction_category_status AS
+SELECT
+    t.expense_id,
+    t.transaction_date,
+    t.merchant,
+    t.description,
+    t.amount,
+    t.category,
+    t.category_id,
+    tc.category_name,
+    CASE
+        WHEN t.category_id IS NULL THEN 'UNBRIDGED'
+        ELSE 'BRIDGED'
+    END AS category_status
+FROM transactions AS t
+LEFT JOIN transactions_category AS tc
+    ON tc.category_id = t.category_id;
+
+CREATE OR REPLACE FUNCTION sync_transaction_category_id()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.category IS NULL THEN
+        NEW.category_id := NULL;
+    ELSE
+        SELECT tc.category_id
+        INTO NEW.category_id
+        FROM transactions_category AS tc
+        WHERE tc.category_name = NEW.category
+        LIMIT 1;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER transactions_category_bridge_trg
+BEFORE INSERT OR UPDATE OF category
+ON transactions
+FOR EACH ROW
+EXECUTE FUNCTION sync_transaction_category_id();

@@ -114,13 +114,17 @@
                 <!-- Category -->
                 <div class="form-group">
                     <label for="category">Category</label>
-
+                
                     <input
                         type="text"
                         id="category"
                         name="category"
-                        placeholder="e.g. Food"
+                        list="categoryOptions"
+                        placeholder="Select or enter a category"
+                        autocomplete="off"
                     >
+                
+                    <datalist id="categoryOptions"></datalist>
                 </div>
 
                 <!-- Description -->

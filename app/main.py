@@ -128,6 +128,7 @@ def fetch_expenses():
         JOIN payment_sources AS ps
             ON ps.payment_source_id = t.payment_source_id
         ORDER BY t.transaction_date DESC, t.expense_id DESC
+        LIMIT 10
     """
 
     with get_connection() as conn:
@@ -152,6 +153,19 @@ def fetch_payment_sources():
             cursor.execute(query)
             return cursor.fetchall()
 
+def fetch_categories():
+    query = """
+        SELECT
+            category_id,
+            category_name
+        FROM transactions_category
+        ORDER BY category_id
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query)
+            return cursor.fetchall()
 
 def create_expense(expense: ExpenseCreate):
     query = """
@@ -314,6 +328,11 @@ def app_payment_sources(
 ):
     return fetch_payment_sources()
 
+@app.get("/app/categories")
+def app_categories(
+    _: str = Depends(verify_basic_auth),
+):
+    return fetch_categories()
 
 # ---------------------------------
 # Health check

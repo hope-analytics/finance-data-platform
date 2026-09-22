@@ -7,6 +7,8 @@ const paymentOptionsContainer = document.getElementById("paymentOptions");
 const paymentSourceId = document.getElementById("payment_source_id");
 const installmentGroup = document.getElementById("installmentGroup");
 const installmentCount = document.getElementById("installment_count");
+const categoryInput = document.getElementById("category");
+const categoryOptions = document.getElementById("categoryOptions");
 
 let selectedPaymentType = null;
 
@@ -237,7 +239,7 @@ form.addEventListener("submit", async function(event) {
             document.getElementById("amount").value,
 
         category:
-            document.getElementById("category").value.trim() || null,
+            categoryInput.value.trim() || null,
 
         payment_source_id:
             Number(paymentSourceId.value),
@@ -338,6 +340,7 @@ refreshButton.addEventListener(
 async function initializeApp() {
     setToday();
     await loadPaymentSources();
+    await loadCategories();
     await loadExpenses();
 }
 
@@ -405,6 +408,44 @@ async function loadPaymentSources() {
 
         paymentOptionsContainer.innerHTML =
             `<p class="empty">Unable to load payment sources.</p>`;
+
+        console.error(error);
+    }
+}
+
+// ---------------------------------
+// Load categories
+// ---------------------------------
+
+async function loadCategories() {
+
+    try {
+
+        const response = await fetch("/app/categories");
+
+        if (!response.ok) {
+
+            const data = await parseResponse(response);
+
+            throw new Error(
+                data.detail || "Failed to load categories"
+            );
+        }
+
+        const categories = await parseResponse(response);
+
+        categoryOptions.innerHTML = "";
+
+        categories.forEach(category => {
+
+            const option = document.createElement("option");
+
+            option.value = category.category_name;
+
+            categoryOptions.appendChild(option);
+        });
+
+    } catch (error) {
 
         console.error(error);
     }
