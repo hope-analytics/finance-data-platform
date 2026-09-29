@@ -48,6 +48,7 @@ CREATE TABLE transactions (
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
     category_id BIGINT,
+    obligation_type VARCHAR(20) NOT NULL,
     
     CONSTRAINT transactions_payment_source_fk
         FOREIGN KEY (payment_source_id)
@@ -55,38 +56,18 @@ CREATE TABLE transactions (
     
     CONSTRAINT transactions_category_fk
         FOREIGN KEY (category_id)
-        REFERENCES category_table (category_id)
+        REFERENCES transaction_category(category_id),
+
+    CONSTRAINT transactions_obligation_type_check
+        CHECK (
+            obligation_type IN (
+                'NORMAL',
+                'SINGLE_PAYMENT',
+                'RECURRING',
+                'INSTALLMENT'
+                )
+        )
 );
-
--- Reference values currently used by the application.
-INSERT INTO payment_sources (payment_name, payment_type) VALUES
-    ('BPI - Amore Cashback', 'CREDIT_CARD'),
-    ('UB - Rewards', 'CREDIT_CARD'),
-    ('UB - Platinum', 'CREDIT_CARD'),
-    ('Cash', 'CASH'),
-    ('Gcash', 'E_WALLET');
-
--- Credit-card reference values.
-INSERT INTO credit_cards (
-    card_name,
-    statement_day,
-    payment_day,
-    payment_source_id
-)
-SELECT
-    v.card_name,
-    v.statement_day,
-    v.payment_day,
-    ps.payment_source_id
-FROM (
-    VALUES
-        ('BPI - Amore Cashback', 28, 15),
-        ('UB - Rewards', 18, 1),
-        ('UB - Platinum', 12, 1)
-) AS v(card_name, statement_day, payment_day)
-JOIN payment_sources AS ps
-    ON ps.payment_name = v.card_name
-WHERE ps.payment_type = 'CREDIT_CARD';
 
 -- Installment plan for applicable payment source
 
@@ -349,10 +330,7 @@ $$;
 
 CREATE OR REPLACE VIEW payment_obligations AS
 
--- Normal credit-card transactions:
--- one obligation for the full transaction amount,
--- but only when no installment plan exists.
-
+-- Credit-card single-payment obligations
 SELECT
     t.expense_id,
     t.payment_source_id,
@@ -362,26 +340,20 @@ SELECT
         cc.payment_day
     ) AS payment_due,
     t.amount AS payment_amount,
-    'NORMAL'::VARCHAR(20) AS obligation_type,
+    'SINGLE_PAYMENT'::VARCHAR(20) AS obligation_type,
     NULL::BIGINT AS plan_id,
-    NULL::SMALLINT AS installment_number
+    NULL::SMALLINT AS installment_number,
+    t.merchant
 FROM transactions AS t
 JOIN payment_sources AS ps
     ON ps.payment_source_id = t.payment_source_id
 JOIN credit_cards AS cc
     ON cc.payment_source_id = t.payment_source_id
-WHERE ps.payment_type = 'CREDIT_CARD'
-  AND NOT EXISTS (
-      SELECT 1
-      FROM installment_plans AS ip
-      WHERE ip.expense_id = t.expense_id
-  )
+WHERE t.obligation_type = 'SINGLE_PAYMENT'
 
 UNION ALL
 
--- Installment transactions:
--- obligations come exclusively from the installment schedule.
-
+-- Credit-card installment obligations
 SELECT
     ip.expense_id,
     t.payment_source_id,
@@ -389,12 +361,28 @@ SELECT
     s.amount AS payment_amount,
     'INSTALLMENT'::VARCHAR(20) AS obligation_type,
     ip.plan_id,
-    s.installment_number
+    s.installment_number,
+    t.merchant
 FROM installment_plans AS ip
 JOIN transactions AS t
     ON t.expense_id = ip.expense_id
 JOIN installment_schedule AS s
-    ON s.plan_id = ip.plan_id;
+    ON s.plan_id = ip.plan_id
+
+UNION ALL
+
+-- Recurring payment obligations
+SELECT
+    t.expense_id,
+    t.payment_source_id,
+    t.transaction_date AS payment_due,
+    t.amount AS payment_amount,
+    'RECURRING'::VARCHAR(20) AS obligation_type,
+    NULL::BIGINT AS plan_id,
+    NULL::SMALLINT AS installment_number,
+    t.merchant
+FROM transactions AS t
+WHERE t.obligation_type = 'RECURRING';
 
 -- Analytical view exposing transaction records with payment-source information.
 
@@ -408,10 +396,11 @@ SELECT
     t.category,
     t.notes,
     t.created_at,
-    ps.payment_name
-FROM transactions t
-JOIN payment_sources ps
-    ON t.payment_source_id = ps.payment_source_id;
+    ps.payment_name,
+    t.obligation_type
+FROM transactions AS t
+LEFT JOIN payment_sources AS ps
+    ON ps.payment_source_id = t.payment_source_id;
 
 -- Analytical view calculating planned monthly credit-card payments.
 
@@ -420,17 +409,16 @@ SELECT
     TO_CHAR(DATE_TRUNC('month', po.payment_due), 'Mon YYYY') AS monthyear,
     EXTRACT(YEAR FROM po.payment_due)::INTEGER AS year,
     EXTRACT(MONTH FROM po.payment_due)::INTEGER AS month,
-    cc.payment_day,
+    EXTRACT(DAY FROM po.payment_due)::SMALLINT AS payment_day,
     po.payment_due,
     SUM(po.payment_amount) AS total_payment,
-    COUNT(*) AS transaction_count
+    COUNT(*) AS transaction_count,
+    po.obligation_type
 FROM payment_obligations AS po
-JOIN credit_cards AS cc
-    ON cc.payment_source_id = po.payment_source_id
 GROUP BY
     DATE_TRUNC('month', po.payment_due),
-    cc.payment_day,
-    po.payment_due
+    po.payment_due,
+    po.obligation_type
 ORDER BY
     po.payment_due DESC;
 
@@ -439,18 +427,6 @@ CREATE TABLE transaction_category (
     category_name VARCHAR(100) NOT NULL,
     CONSTRAINT category_table_name_unique UNIQUE (category_name)
 );
-
-INSERT INTO category_table (category_name)
-VALUES
-    ('Home'),
-    ('Clothing'),
-    ('Motor Maintenance'),
-    ('Food & Groceries'),
-    ('Transportation'),
-    ('Housing'),
-    ('Entertainment'),
-    ('Needs'),
-    ('Investment');
 
 CREATE OR REPLACE VIEW vw_transaction_category_status AS
 SELECT
@@ -494,3 +470,290 @@ BEFORE INSERT OR UPDATE OF category
 ON transactions
 FOR EACH ROW
 EXECUTE FUNCTION sync_transaction_category_id();
+
+CREATE TABLE recurring_expenses (
+    recurring_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    merchant VARCHAR(255) NOT NULL,
+    description TEXT,
+    amount NUMERIC(12,2) NOT NULL 
+        CHECK(amount > 0),
+    category VARCHAR(100),
+    payment_source_id BIGINT NOT NULL,
+    contract_start_date DATE NOT NULL,
+    contract_end_date DATE NOT NULL,
+    status VARCHAR(20) NOT NULL
+        CHECK(
+            status IN (
+                'ACTIVE',
+                'COMPLETED',
+                'CANCELLED'
+            )
+        ),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT recurring_contract_dates_check
+        CHECK(contract_end_date >= contract_start_date),
+
+    CONSTRAINT recurring_payment_source_fk
+        FOREIGN KEY(payment_source_id)
+        REFERENCES payment_sources(payment_source_id)
+);
+
+CREATE TABLE recurring_schedule (
+    schedule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    recurring_id BIGINT NOT NULL,
+    occurrence_number SMALLINT NOT NULL
+        CHECK(occurrence_number >= 1),
+    payment_date DATE NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT recurring_schedule_recurring_fk
+        FOREIGN KEY (recurring_id)
+        REFERENCES recurring_expenses(recurring_id),
+
+    CONSTRAINT recurring_schedule_occurrence_unique
+        UNIQUE (recurring_id, occurrence_number)
+);
+
+CREATE INDEX idx_recurring_Schedule_payment_date
+    ON recurring_schedule(payement_date)
+;
+
+CREATE INDEX idx_recurring_schedule_status
+    ON recurring_expenses(status)
+;
+
+CREATE OR REPLACE FUNCTION generate_recurring_schedule(
+    p_recurring_id BIGINT
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_contract_start_date DATE;
+    v_contract_end_date DATE;
+    v_occurrence_number SMALLINT := 1;
+    v_current_date DATE;
+    v_generated_count INTEGER := 0;
+BEGIN
+
+    SELECT
+        contract_start_date,
+        contract_end_date
+    INTO
+        v_contract_start_date,
+        v_contract_end_date
+    FROM recurring_expenses
+    WHERE recurring_id = p_recurring_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'Recurring expense % does not exist',
+            p_recurring_id;
+    END IF;
+
+    IF v_contract_start_date IS NULL
+       OR v_contract_end_date IS NULL THEN
+        RAISE EXCEPTION
+            'Recurring expense % has NULL contract dates',
+            p_recurring_id;
+    END IF;
+
+    IF v_contract_end_date < v_contract_start_date THEN
+        RAISE EXCEPTION
+            'Recurring expense % has an end date before its start date',
+            p_recurring_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM recurring_schedule
+        WHERE recurring_id = p_recurring_id
+    ) THEN
+        RAISE EXCEPTION
+            'Recurring expense % already has generated schedule rows',
+            p_recurring_id;
+    END IF;
+
+    v_current_date := v_contract_start_date;
+
+    WHILE v_current_date <= v_contract_end_date
+    LOOP
+
+        INSERT INTO recurring_schedule (
+            recurring_id,
+            occurrence_number,
+            payment_date
+        )
+        VALUES (
+            p_recurring_id,
+            v_occurrence_number,
+            v_current_date
+        );
+
+        v_generated_count := v_generated_count + 1;
+        v_occurrence_number := v_occurrence_number + 1;
+
+        v_current_date :=
+            (
+                DATE_TRUNC('month', v_current_date)
+                + INTERVAL '1 month'
+                + (
+                    LEAST(
+                        EXTRACT(
+                            DAY FROM v_contract_start_date
+                        )::INTEGER,
+                        EXTRACT(
+                            DAY FROM (
+                                DATE_TRUNC('month', v_current_date)
+                                + INTERVAL '2 month - 1 day'
+                            )
+                        )::INTEGER
+                    ) - 1
+                ) * INTERVAL '1 day'
+            )::DATE;
+
+    END LOOP;
+
+    RETURN v_generated_count;
+
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION generate_recurring_transactions(
+    p_recurring_id BIGINT
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_merchant VARCHAR(255);
+    v_description TEXT;
+    v_amount NUMERIC(12,2);
+    v_category VARCHAR(100);
+    v_payment_source_id BIGINT;
+    v_generated_count INTEGER := 0;
+    r_schedule RECORD;
+BEGIN
+
+    SELECT
+        merchant,
+        description,
+        amount,
+        category,
+        payment_source_id
+    INTO
+        v_merchant,
+        v_description,
+        v_amount,
+        v_category,
+        v_payment_source_id
+    FROM recurring_expenses
+    WHERE recurring_id = p_recurring_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'Recurring expense % does not exist',
+            p_recurring_id;
+    END IF;
+
+    IF v_amount IS NULL OR v_amount <= 0 THEN
+        RAISE EXCEPTION
+            'Recurring expense % has an invalid amount: %',
+            p_recurring_id,
+            v_amount;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM recurring_schedule
+        WHERE recurring_id = p_recurring_id
+    ) THEN
+        RAISE EXCEPTION
+            'Recurring expense % has no generated schedule',
+            p_recurring_id;
+    END IF;
+
+    FOR r_schedule IN
+        SELECT
+            schedule_id,
+            occurrence_number,
+            payment_date
+        FROM recurring_schedule
+        WHERE recurring_id = p_recurring_id
+        ORDER BY occurrence_number
+        FOR UPDATE
+    LOOP
+
+        INSERT INTO transactions (
+            transaction_date,
+            merchant,
+            description,
+            amount,
+            category,
+            payment_source_id,
+            obligation_type
+        )
+        VALUES (
+            r_schedule.payment_date,
+            v_merchant,
+            v_description,
+            v_amount,
+            v_category,
+            v_payment_source_id,
+            'RECURRING'
+        );
+
+        v_generated_count := v_generated_count + 1;
+
+    END LOOP;
+
+    RETURN v_generated_count;
+
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION trg_materialize_recurring_expense()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+
+    PERFORM generate_recurring_schedule(NEW.recurring_id);
+
+    PERFORM generate_recurring_transactions(NEW.recurring_id);
+
+    RETURN NEW;
+
+END;
+$$;
+
+CREATE TRIGGER recurring_expenses_materialize_trg
+AFTER INSERT
+ON recurring_expenses
+FOR EACH ROW
+EXECUTE FUNCTION trg_materialize_recurring_expense();
+
+INSERT INTO recurring_expenses (
+    merchant,
+    description,
+    amount,
+    category,
+    payment_source_id,
+    contract_start_date,
+    contract_end_date,
+    status
+)
+VALUES (
+    'TEST Trigger Chain',
+    'Verify automatic trigger chain',
+    500.00,
+    'TEST',
+    2,
+    DATE '2026-10-01',
+    DATE '2026-12-01',
+    'ACTIVE'
+)
+RETURNING recurring_id;

@@ -91,6 +91,100 @@ installment_plans
 
 The original transaction remains unchanged as the spending record.
 
+## Recurring Expenses
+
+Recurring expenses represent predefined recurring financial commitments that can produce future transaction occurrences.
+
+The recurring-expense model consists conceptually of two objects:
+
+- `recurring_expenses` — the recurring commitment definition
+- `recurring_schedule` — the future scheduled occurrences generated from that definition
+
+The relationship is:
+
+```text
+recurring_expenses
+      |
+      | 1
+      |
+      | N
+      v
+recurring_schedule
+      |
+      | scheduled occurrence
+      v
+transactions
+```
+
+### recurring_expenses
+
+`recurring_expenses` represents the recurring financial commitment.
+
+The approved conceptual definition includes:
+
+- recurring identifier
+- merchant
+- description
+- amount
+- category
+- category reference
+- payment-source reference
+- contract start date
+- contract end date
+- creation timestamp
+
+The recurring definition does not require an obligation type because every record in this domain represents a recurring commitment by definition.
+
+The recurring commitment is bounded by its contract period. Automatic renewal is not part of the approved architecture.
+
+The exact physical schema, recurrence-frequency representation, and database constraints are implementation decisions for the subsequent database-design phase.
+
+### recurring_schedule
+
+`recurring_schedule` represents the future occurrences associated with a recurring expense.
+
+Each schedule occurrence retains its originating `recurring_id`.
+
+The schedule exists so that future recurring financial activity can be represented before the corresponding transaction date occurs.
+
+For example, a recurring commitment beginning on a future date can have its future scheduled occurrence represented in the schedule before that occurrence becomes an actual transaction.
+
+The exact schedule-generation mechanism, frequency representation, payment-date field, and duplicate-prevention constraints are not defined by the current architectural decision.
+
+### Recurring Schedule to Transaction
+
+When a scheduled occurrence reaches its payment date, the occurrence is materialized into the `transactions` table.
+
+The resulting transaction follows the normal transaction structure.
+
+Conceptually:
+
+```text
+recurring_schedule
+        |
+        | scheduled occurrence
+        v
+transactions
+```
+
+The generated transaction receives its transaction date, merchant, description, amount, category information, and payment source from the recurring definition.
+
+The transaction is classified as:
+
+```text
+obligation_type = RECURRING
+```
+
+The transaction does not require a `recurring_id`.
+
+The recurring schedule retains the lineage to the originating recurring definition.
+
+This preserves the distinction between:
+
+- the recurring commitment;
+- the scheduled future occurrence; and
+- the actual financial transaction.
+
 ### Installment Plans → Installment Schedule
 
 Each installment plan can have multiple installment schedule records.
@@ -127,7 +221,29 @@ The `transactions` table stores individual financial transactions.
 | `notes` | TEXT | Optional transaction notes |
 | `created_at` | TIMESTAMP | Record creation timestamp |
 
-The original transaction remains the authoritative spending record.
+The `transactions` table remains the canonical source of truth for actual financial events.
+
+Transactions may originate from different financial contexts, including:
+
+- normal non-recurring transactions;
+- recurring expense occurrences;
+- credit-card single payments; and
+- credit-card installment transactions.
+
+The approved transaction classification model uses `obligation_type` to describe the transaction's payment behavior:
+
+| Transaction scenario | `obligation_type` |
+|---|---|
+| Normal non-recurring transaction | `NORMAL` |
+| Recurring transaction | `RECURRING` |
+| Credit-card transaction without installment | `SINGLE_PAYMENT` |
+| Credit-card transaction with installment | `INSTALLMENT` |
+
+`obligation_type` does not replace `payment_source_id`.
+
+For example, a recurring expense paid using a credit card remains associated with its credit-card payment source while being classified as `RECURRING`.
+
+The exact physical implementation of `obligation_type` is part of the subsequent database implementation phase.
 
 ### payment_sources
 

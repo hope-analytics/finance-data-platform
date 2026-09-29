@@ -180,6 +180,29 @@ Example:
 
 For a transaction without installments, `installment_plan_id` is not returned as an installment-plan identifier.
 
+## Recurring Transaction Behavior
+
+Recurring transaction occurrences are system-generated from the recurring-expense schedule.
+
+The frontend does not submit `obligation_type` as a user-controlled transaction attribute.
+
+The application determines the transaction classification from the transaction context.
+
+The approved classification behavior is:
+
+| Context | `obligation_type` |
+|---|---|
+| Normal non-recurring transaction | `NORMAL` |
+| Credit-card transaction without installment | `SINGLE_PAYMENT` |
+| Credit-card transaction with installment | `INSTALLMENT` |
+| Recurring schedule materialization | `RECURRING` |
+
+A recurring transaction is therefore created through the scheduled materialization process rather than by requiring the user to manually enter the recurring transaction on its scheduled date.
+
+The exact recurring-expense endpoints, schedule-generation process, and materialization implementation are not defined by the current architecture documentation and will be established during the subsequent application-development phase.
+
+Clients must not be permitted to arbitrarily assign an obligation type.
+
 ### Transaction Retrieval Response
 
 Transaction retrieval endpoints provide transaction information together with the associated payment-source information.

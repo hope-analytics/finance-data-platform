@@ -127,6 +127,7 @@ def fetch_expenses():
         FROM transactions AS t
         JOIN payment_sources AS ps
             ON ps.payment_source_id = t.payment_source_id
+        WHERE obligation_type <> 'RECURRING'
         ORDER BY t.transaction_date DESC, t.expense_id DESC
         LIMIT 10
     """
@@ -176,7 +177,8 @@ def create_expense(expense: ExpenseCreate):
             amount,
             category,
             payment_source_id,
-            notes
+            notes,
+            obligation_type
         )
         SELECT
             %s,
@@ -185,7 +187,14 @@ def create_expense(expense: ExpenseCreate):
             %s,
             %s,
             ps.payment_source_id,
-            %s
+            %s,
+            CASE
+                WHEN ps.payment_type = 'CREDIT_CARD' AND %s IS NOT NULL
+                    THEN 'INSTALLMENT'
+                WHEN ps.payment_type = 'CREDIT_CARD'
+                    THEN 'SINGLE_PAYMENT'
+                ELSE 'NORMAL'
+            END
         FROM payment_sources AS ps
         WHERE ps.payment_source_id = %s
           AND ps.active = TRUE
@@ -198,6 +207,7 @@ def create_expense(expense: ExpenseCreate):
             category,
             payment_source_id,
             notes,
+            obligation_type,
             created_at
     """
 
@@ -208,6 +218,7 @@ def create_expense(expense: ExpenseCreate):
         expense.amount,
         expense.category,
         expense.notes,
+        expense.installment_count,
         expense.payment_source_id,
     )
 
@@ -341,3 +352,4 @@ def app_categories(
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+

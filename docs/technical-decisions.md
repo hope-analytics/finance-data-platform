@@ -198,3 +198,70 @@ The database-controlled function is responsible for:
 FastAPI invokes this operation but does not independently calculate installment amounts or payment dates.
 
 The original transaction creation and installment creation occur within the same database transaction so that a failure during installment creation causes the transaction to be rolled back.
+
+## 14. Keep Recurring Commitments Separate from Transactions
+
+### Decision
+
+Represent recurring financial commitments through a recurring-expense definition and recurring schedule rather than creating a separate recurring transaction table.
+
+### Reason
+
+`transactions` remains the canonical source of truth for actual financial events.
+
+A recurring expense represents an expected future commitment, while a transaction represents an actual financial event.
+
+Separating these concepts allows future recurring activity to be visible before the transaction date without treating scheduled future commitments as completed transactions.
+
+The approved flow is:
+
+```text
+recurring_expenses
+        ↓
+recurring_schedule
+        ↓
+transactions
+```
+
+When the scheduled occurrence reaches its payment date, it is materialized into the canonical transaction domain.
+
+## 15. Use a Recurring Schedule for Future Visibility
+
+### Decision
+
+Maintain a recurring schedule containing future occurrences associated with the recurring expense definition.
+
+### Reason
+
+Future recurring expenses should be visible before their transaction dates occur.
+
+The recurring schedule provides the planning representation of those future occurrences and retains `recurring_id` so that each scheduled occurrence remains traceable to its originating recurring definition.
+
+Recurring commitments are bounded by a contract start date and contract end date.
+
+Automatic renewal is not part of the approved architecture.
+
+The exact recurrence-frequency representation, schedule-generation logic, and database constraints are implementation decisions for the subsequent development phase.
+
+## 16. Classify Transaction Payment Behavior Through `obligation_type`
+
+### Decision
+
+Use `obligation_type` on the transaction domain to classify the payment behavior of actual transactions.
+
+### Reason
+
+The classification allows the transaction domain to distinguish different payment behaviors without creating separate transaction structures.
+
+The approved values are:
+
+- `NORMAL` — normal non-recurring transaction
+- `RECURRING` — transaction materialized from a recurring schedule
+- `SINGLE_PAYMENT` — credit-card transaction without an installment plan and without recurring classification
+- `INSTALLMENT` — credit-card transaction associated with an installment plan
+
+`obligation_type` does not replace `payment_source_id`.
+
+The classification is system-determined rather than user-entered. This prevents clients from arbitrarily assigning payment behavior to transactions.
+
+Recurring expenses and installments remain separate mechanisms even though both ultimately interact with the canonical transaction domain.

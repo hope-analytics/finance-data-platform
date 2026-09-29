@@ -123,6 +123,42 @@ The view does not replace or modify the underlying `transactions` table.
 - **Table — Daily Expenses**
 - **Line Chart — Daily Expenses**
 
+## Recurring Expenses and Analytics
+
+Recurring expenses introduce a distinction between future scheduled commitments and actual transaction records.
+
+Before the scheduled payment date:
+
+```text
+recurring_expenses
+        ↓
+recurring_schedule
+```
+
+the recurring activity represents a future scheduled commitment rather than an actual transaction.
+
+When the scheduled occurrence is materialized:
+
+```text
+recurring_schedule
+        ↓
+transactions
+        ↓
+Analytical Views
+        ↓
+Apache Superset
+```
+
+the resulting record becomes part of the canonical transaction domain and can participate in transaction-level analytics.
+
+The resulting transaction is classified as `RECURRING` through `obligation_type`.
+
+The current architecture does not introduce a separate recurring analytical semantic layer or recurring-specific analytical view.
+
+Any future recurring-expense reporting requirements should be evaluated against the existing transaction and analytical-view architecture after the recurring implementation is defined.
+
+No recurring-specific Superset dataset or visualization is part of the current approved architecture.
+
 ---
 
 ## `payment_obligations`

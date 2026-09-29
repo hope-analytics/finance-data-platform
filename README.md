@@ -308,7 +308,7 @@ The implementation and supporting technical documentation have been integrated i
 
 The platform provides a foundation for structured financial transaction data and payment-level analytics while remaining extensible for future financial use cases.
 
-## Project Direction
+### Project Direction
 
 Future development can extend the platform toward:
 
@@ -317,7 +317,12 @@ Future development can extend the platform toward:
 - Data transformation and validation workflows
 - Expanded reporting capabilities
 - Additional automation around transaction processing
+- Recurring financial commitments and scheduled transaction generation
 - More advanced financial insights
+
+The approved recurring-expense architecture separates recurring commitments from actual financial transactions. Recurring definitions produce scheduled future occurrences, which are materialized into the canonical `transactions` domain when their payment dates are reached.
+
+Recurring expenses are an approved architectural direction and are not represented as implemented functionality until the corresponding database and application development is completed.
 
 Future capabilities should be treated as planned extensions rather than current functionality unless implemented and documented.
 
