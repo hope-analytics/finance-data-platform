@@ -37,7 +37,7 @@ Superset connects directly to the PostgreSQL data source and consumes purpose-sp
 The current analytical datasets are:
 
 - `vw_transactions` for transaction-level reporting and visualization
-- `vw_monthly_payments` for monthly credit-card payment reporting
+- `vw_monthly_payments` for payment-obligation and monthly payment reporting
 
 This keeps analytical reporting separate from the transaction-entry application while allowing the same centralized PostgreSQL data to be used for analysis and visualization.
 
@@ -133,9 +133,11 @@ Use a single `transactions` table as the source of the original spending event.
 
 The current platform focuses on capturing and analyzing financial transactions. The original transaction remains the central spending entity.
 
-Additional financial concepts such as installment relationships and payment obligations are represented through separate database objects rather than creating additional spending transactions.
+Additional financial concepts such as installment relationships, recurring commitments, and payment obligations are represented through separate database objects rather than creating additional spending transactions.
 
 This allows the original transaction to remain the source of truth while supporting derived payment-level analysis.
+
+For recurring expenses, the current V1 implementation materializes scheduled occurrences as future-dated records in `transactions`. These records remain identifiable through `obligation_type = 'RECURRING'`.
 
 ## 11. Separate Spending Events from Installment Payment Obligations
 
@@ -152,7 +154,7 @@ The data model therefore separates:
 - `transactions` for the original spending event;
 - `installment_plans` for the installment relationship;
 - `installment_schedule` for derived installment payment allocations; and
-- `payment_obligations` for the current credit-card payment-level semantic representation.
+- `payment_obligations` for the payment-obligation semantic representation.
 
 This prevents installment payments from being interpreted as separate purchases and preserves transaction-level reporting integrity.
 
@@ -207,23 +209,23 @@ Represent recurring financial commitments through a recurring-expense definition
 
 ### Reason
 
-`transactions` remains the canonical source of truth for actual financial events.
+`recurring_expenses` represents the recurring commitment definition, while `recurring_schedule` represents its scheduled occurrences. The canonical `transactions` table remains the transaction domain.
 
-A recurring expense represents an expected future commitment, while a transaction represents an actual financial event.
-
-Separating these concepts allows future recurring activity to be visible before the transaction date without treating scheduled future commitments as completed transactions.
-
-The approved flow is:
+In the current V1 implementation, recurring occurrences are materialized immediately after a recurring expense is inserted. A database `AFTER INSERT` trigger invokes the schedule-generation and transaction-generation functions:
 
 ```text
-recurring_expenses
+INSERT recurring_expenses
         ↓
-recurring_schedule
+AFTER INSERT trigger
         ↓
-transactions
+trg_materialize_recurring_expense()
+        ├── generate_recurring_schedule()
+        └── generate_recurring_transactions()
 ```
 
-When the scheduled occurrence reaches its payment date, it is materialized into the canonical transaction domain.
+The generated transactions use the scheduled `payment_date` as their `transaction_date` and are classified as `RECURRING`.
+
+Therefore, the implemented V1 behavior is immediate creation of future-dated transaction records rather than waiting until each payment date to create the transaction.
 
 ## 15. Use a Recurring Schedule for Future Visibility
 
@@ -233,27 +235,31 @@ Maintain a recurring schedule containing future occurrences associated with the 
 
 ### Reason
 
-Future recurring expenses should be visible before their transaction dates occur.
+Future recurring expenses should be visible through scheduled payment dates before those dates occur.
 
-The recurring schedule provides the planning representation of those future occurrences and retains `recurring_id` so that each scheduled occurrence remains traceable to its originating recurring definition.
+The recurring schedule contains `recurring_id` so that each scheduled occurrence can be associated with its originating recurring definition.
+
+The current physical model does **not** maintain a permanent foreign-key relationship from `recurring_schedule` to the generated `transactions` rows. `recurring_schedule` therefore provides recurring-definition association, but it should not be interpreted as a transaction-lineage table.
 
 Recurring commitments are bounded by a contract start date and contract end date.
 
-Automatic renewal is not part of the approved architecture.
+Automatic renewal is not part of the current V1 architecture.
 
-The exact recurrence-frequency representation, schedule-generation logic, and database constraints are implementation decisions for the subsequent development phase.
+The current V1 implementation generates the recurring schedule and corresponding future-dated transactions through database-controlled functions immediately after the recurring definition is inserted.
+
+Future correction, deletion, or reconciliation of generated recurring transactions would require an explicit lineage design; the current model does not infer that relationship by matching merchant, amount, date, or other transaction attributes.
 
 ## 16. Classify Transaction Payment Behavior Through `obligation_type`
 
 ### Decision
 
-Use `obligation_type` on the transaction domain to classify the payment behavior of actual transactions.
+Use `obligation_type` on the transaction domain to classify the payment behavior of actual transaction records.
 
 ### Reason
 
 The classification allows the transaction domain to distinguish different payment behaviors without creating separate transaction structures.
 
-The approved values are:
+The implemented values are:
 
 - `NORMAL` — normal non-recurring transaction
 - `RECURRING` — transaction materialized from a recurring schedule
@@ -265,3 +271,49 @@ The approved values are:
 The classification is system-determined rather than user-entered. This prevents clients from arbitrarily assigning payment behavior to transactions.
 
 Recurring expenses and installments remain separate mechanisms even though both ultimately interact with the canonical transaction domain.
+
+The `payment_obligations` layer uses these transaction classifications as part of the broader payment-obligation model, including `SINGLE_PAYMENT`, `INSTALLMENT`, and `RECURRING` obligations.
+
+## 17. Use Database-Controlled Recurring Materialization
+
+### Decision
+
+Use PostgreSQL database functions and an `AFTER INSERT` trigger to generate recurring schedules and materialize recurring transactions.
+
+### Reason
+
+The recurring-expense creation process requires coordinated generation of all scheduled occurrences and their corresponding future-dated transaction records.
+
+The current database-controlled process:
+
+1. Inserts the recurring expense definition.
+2. Triggers recurring schedule generation.
+3. Generates the scheduled occurrences.
+4. Generates the corresponding future-dated transactions.
+5. Assigns `obligation_type = 'RECURRING'`.
+6. Allows those transactions to participate in the existing payment-obligation and analytical layers.
+
+This keeps recurring generation within the database and prevents the application from independently reproducing the recurring schedule/materialization logic.
+
+The current application does not expose a dedicated recurring-expense CRUD API. Recurring-expense creation and schedule generation are currently database-controlled.
+
+## 18. Do Not Introduce a Dedicated Recurring Analytics Layer in V1
+
+### Decision
+
+Use the existing transaction and payment-obligation analytical structures for recurring-generated data rather than creating a dedicated recurring analytical view.
+
+### Reason
+
+Recurring-generated transactions already participate in:
+
+- `vw_transactions`
+- `payment_obligations`
+- `vw_monthly_payments`
+- Superset datasets consuming these views
+
+A separate recurring-specific analytical view is not required for the current V1 scope.
+
+Because recurring-generated transactions are future-dated, downstream analytics must distinguish future scheduled transaction records from realized spending through the current date when the reporting requirement requires that distinction.
+
+A dedicated recurring analytical view or recurring-specific Superset dashboard remains outside the current V1 scope.

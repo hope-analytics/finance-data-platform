@@ -8,6 +8,8 @@ The API accepts JSON requests from the web application and persists validated tr
 
 The transaction creation API also supports optional credit-card installment creation.
 
+Recurring expenses are currently generated through the database-controlled recurring process rather than through a dedicated recurring-expense CRUD API.
+
 ## Base URL
 
 When running locally:
@@ -39,6 +41,8 @@ The route is protected using HTTP Basic authentication.
 Returns recent transaction records for display in the web application.
 
 The response includes transaction details and the associated payment-source information, including `payment_name`.
+
+Recurring-generated transactions are excluded from this normal recent-expense display. They remain stored in the canonical `transactions` table.
 
 #### `POST /app/expenses`
 
@@ -126,6 +130,8 @@ The optional `installment_count` field must be an integer greater than or equal 
 
 Credit-card eligibility and installment creation are controlled by the database implementation.
 
+`obligation_type` is not accepted as a user-controlled request field.
+
 ## Payment Sources
 
 Payment sources are maintained as reference data in PostgreSQL.
@@ -180,29 +186,6 @@ Example:
 
 For a transaction without installments, `installment_plan_id` is not returned as an installment-plan identifier.
 
-## Recurring Transaction Behavior
-
-Recurring transaction occurrences are system-generated from the recurring-expense schedule.
-
-The frontend does not submit `obligation_type` as a user-controlled transaction attribute.
-
-The application determines the transaction classification from the transaction context.
-
-The approved classification behavior is:
-
-| Context | `obligation_type` |
-|---|---|
-| Normal non-recurring transaction | `NORMAL` |
-| Credit-card transaction without installment | `SINGLE_PAYMENT` |
-| Credit-card transaction with installment | `INSTALLMENT` |
-| Recurring schedule materialization | `RECURRING` |
-
-A recurring transaction is therefore created through the scheduled materialization process rather than by requiring the user to manually enter the recurring transaction on its scheduled date.
-
-The exact recurring-expense endpoints, schedule-generation process, and materialization implementation are not defined by the current architecture documentation and will be established during the subsequent application-development phase.
-
-Clients must not be permitted to arbitrarily assign an obligation type.
-
 ### Transaction Retrieval Response
 
 Transaction retrieval endpoints provide transaction information together with the associated payment-source information.
@@ -227,6 +210,51 @@ Example:
 ```
 
 The creation and retrieval response contracts should therefore be treated separately.
+
+## Recurring Transaction Behavior
+
+Recurring transaction occurrences are system-generated through the database-controlled recurring process.
+
+The frontend does not submit `obligation_type` as a user-controlled transaction attribute.
+
+The implemented classification behavior is:
+
+| Context | `obligation_type` |
+|---|---|
+| Normal non-recurring transaction | `NORMAL` |
+| Credit-card transaction without installment | `SINGLE_PAYMENT` |
+| Credit-card transaction with installment | `INSTALLMENT` |
+| Recurring-generated transaction | `RECURRING` |
+
+For normal transaction creation, the application derives the appropriate classification from the transaction context.
+
+For recurring-generated transactions, the database recurring process assigns `RECURRING` during transaction materialization.
+
+The recurring flow is:
+
+```text
+recurring_expenses
+        |
+        v
+AFTER INSERT trigger
+        |
+        +-----------------------------+
+        |                             |
+        v                             v
+generate_recurring_schedule()  generate_recurring_transactions()
+        |                             |
+        v                             v
+recurring_schedule              future-dated transactions
+                                      |
+                                      v
+                              obligation_type = RECURRING
+```
+
+Creating a recurring expense therefore causes the bounded schedule and its corresponding future-dated transaction records to be generated immediately through the database-controlled process. The scheduled `payment_date` is used as the generated transaction's `transaction_date`.
+
+There is currently no dedicated recurring-expense CRUD endpoint in the FastAPI application.
+
+Clients must not be permitted to arbitrarily assign an obligation type.
 
 ## Installment Creation Flow
 
@@ -314,7 +342,25 @@ create_installment_plan()
       +-- installment_schedule
 ```
 
-The database remains responsible for the authoritative transaction amount, credit-card eligibility, payment-date calculation, schedule allocation, and schedule reconciliation.
+For recurring expenses, the current application boundary is different:
+
+```text
+recurring_expenses
+      |
+      v
+PostgreSQL AFTER INSERT trigger
+      |
+      +-- generate_recurring_schedule()
+      |
+      +-- generate_recurring_transactions()
+      |
+      v
+future-dated transactions
+```
+
+The database remains responsible for recurring schedule generation and recurring transaction materialization.
+
+The generated recurring transactions remain in the canonical `transactions` table and participate in the downstream payment-obligation and analytical layers.
 
 ## Authentication
 
@@ -383,6 +429,15 @@ The API currently supports:
 - Optional credit-card installment creation
 - Database-controlled installment schedule generation
 - Transactional rollback when installment creation fails
+- System-derived transaction obligation classification
+- Database-controlled recurring transaction materialization
+
+The current recurring implementation does not expose dedicated FastAPI endpoints for:
+
+- Creating recurring commitments
+- Updating recurring commitments
+- Deleting recurring commitments
+- Manually managing recurring schedules
 
 The current V1 API does not implement:
 

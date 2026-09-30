@@ -14,7 +14,9 @@ PostgreSQL
 │   ├── payment_sources
 │   ├── credit_cards
 │   ├── installment_plans
-│   └── installment_schedule
+│   ├── installment_schedule
+│   ├── recurring_expenses
+│   └── recurring_schedule
 │
 ├── Payment Semantic Layer
 │   └── payment_obligations
@@ -30,11 +32,11 @@ PostgreSQL
 
 The operational tables remain the underlying source of financial transaction data.
 
-The payment semantic layer provides the current credit-card payment-level representation used by payment-oriented analytical logic.
+The payment semantic layer provides the current payment-obligation representation used by payment-oriented analytical logic. It supports single-payment, installment, and recurring obligations.
 
 Analytical views provide purpose-specific datasets for reporting and visualization without requiring Superset charts to query the raw transactional structures directly.
 
-Apache Superset is the current reporting and visualization platform for the project.      
+Apache Superset is the current reporting and visualization platform for the project.
 
 ---
 
@@ -45,7 +47,7 @@ The current analytics layer contains two PostgreSQL views:
 | View | Grain | Primary Purpose |
 |---|---|---|
 | `vw_transactions` | One row per transaction | Transaction-level reporting and visualization |
-| `vw_monthly_payments` | One row per payment due date/payment-day grouping | Monthly credit-card payment analysis |
+| `vw_monthly_payments` | One row per payment due date/payment-day grouping | Monthly payment analysis |
 
 These views provide stable analytical interfaces for Apache Superset.
 
@@ -102,6 +104,14 @@ The view exposes analytical fields derived from the transaction and payment-sour
 | `notes` | `transactions` | Additional transaction notes |
 | `created_at` | `transactions` | Record creation timestamp |
 | `payment_name` | `payment_sources` | Human-readable payment source name |
+| `obligation_type` | `transactions` | Classification of the transaction's payment-obligation context |
+
+`obligation_type` allows downstream analytics to distinguish:
+
+- `NORMAL`
+- `SINGLE_PAYMENT`
+- `RECURRING`
+- `INSTALLMENT`
 
 ### Transformation Logic
 
@@ -110,7 +120,8 @@ The view performs a relational enrichment:
 1. Reads transaction records from `transactions`.
 2. Matches each transaction to its payment source using `payment_source_id`.
 3. Exposes the corresponding `payment_name`.
-4. Presents the resulting transaction-level dataset to the analytics layer.
+4. Preserves the transaction's `obligation_type`.
+5. Presents the resulting transaction-level dataset to the analytics layer.
 
 The view does not replace or modify the underlying `transactions` table.
 
@@ -119,45 +130,43 @@ The view does not replace or modify the underlying `transactions` table.
 `vw_transactions` is the current analytical dataset used for transaction-level Superset visualizations, including:
 
 - **KPI — Total Transactions**
-- **Bar Chart — Categorical Transactions**
+- **Bar Chart — Used Payment Source**
+- **Pie Chart — Categorical Transactions**
 - **Table — Daily Expenses**
 - **Line Chart — Daily Expenses**
 
 ## Recurring Expenses and Analytics
 
-Recurring expenses introduce a distinction between future scheduled commitments and actual transaction records.
+Recurring expenses are represented in the analytical layer through the same transaction and payment-obligation structures used by the rest of the platform.
 
-Before the scheduled payment date:
+When a recurring expense is created, the database immediately materializes its scheduled occurrences as future-dated transaction records:
 
 ```text
 recurring_expenses
         ↓
 recurring_schedule
-```
-
-the recurring activity represents a future scheduled commitment rather than an actual transaction.
-
-When the scheduled occurrence is materialized:
-
-```text
-recurring_schedule
         ↓
-transactions
+future-dated transactions
         ↓
 Analytical Views
         ↓
 Apache Superset
 ```
 
-the resulting record becomes part of the canonical transaction domain and can participate in transaction-level analytics.
+The generated transaction uses the scheduled `payment_date` as its `transaction_date` and is classified as `RECURRING` through `obligation_type`.
 
-The resulting transaction is classified as `RECURRING` through `obligation_type`.
+As a result, recurring-generated transactions participate in:
+
+- `vw_transactions`
+- `payment_obligations`
+- `vw_monthly_payments`
+- Superset datasets that consume these analytical views
+
+This creates an important analytical distinction: the transaction population can contain future-dated recurring records. A transaction-level count or amount should therefore not automatically be interpreted as actual spending realized through the current date unless the analytical query applies an appropriate date filter.
 
 The current architecture does not introduce a separate recurring analytical semantic layer or recurring-specific analytical view.
 
-Any future recurring-expense reporting requirements should be evaluated against the existing transaction and analytical-view architecture after the recurring implementation is defined.
-
-No recurring-specific Superset dataset or visualization is part of the current approved architecture.
+No dedicated recurring-expense Superset dataset or visualization is currently implemented. Recurring data is instead exposed through the existing analytical layer.
 
 ---
 
@@ -165,25 +174,29 @@ No recurring-specific Superset dataset or visualization is part of the current a
 
 ### Purpose
 
-`payment_obligations` provides the current **credit-card payment-level semantic layer** for the analytics model.
+`payment_obligations` provides the current **payment-obligation semantic layer** for the analytics model.
 
-It represents payment obligations derived from credit-card transaction and installment information without changing the original spending transaction.
+It represents resolved payment obligations derived from the platform's transaction and payment structures without changing the original spending transaction.
 
 ### Current Semantics
 
-For a credit-card transaction without an installment plan, the view represents the transaction as a normal credit-card payment obligation.
+For a credit-card transaction without an installment plan, the layer represents the transaction as a single-payment obligation.
 
-For a credit-card transaction with an installment plan, the view represents the installment schedule as installment payment obligations.
+For a credit-card transaction with an installment plan, the layer represents the installment schedule as installment payment obligations.
+
+For recurring-generated transactions, the layer represents the generated future-dated transaction as a recurring payment obligation.
 
 An installment transaction does not additionally produce a normal full-amount payment obligation.
 
 ### Current Scope
 
-The current `payment_obligations` view is credit-card-specific.
+The current `payment_obligations` layer supports:
 
-It does not currently provide payment obligations for non-credit-card payment sources.
+- `SINGLE_PAYMENT`
+- `INSTALLMENT`
+- `RECURRING`
 
-Therefore it should not be interpreted as a universal payment-obligation layer for all payment types.
+It should therefore be interpreted as a payment-obligation semantic layer rather than as a credit-card-only layer.
 
 ---
 
@@ -191,20 +204,14 @@ Therefore it should not be interpreted as a universal payment-obligation layer f
 
 ### Purpose
 
-`vw_monthly_payments` provides an aggregated credit-card payment-level analytical dataset for monthly payment reporting.
+`vw_monthly_payments` provides an aggregated payment-obligation analytical dataset for monthly payment reporting.
 
-The view consumes the current `payment_obligations` semantic layer rather than independently recreating installment payment logic from the underlying transaction records.
+The view consumes the current `payment_obligations` semantic layer rather than independently recreating payment timing logic from the underlying transaction records.
 
 ### Analytical Flow
 
 ```text
-transactions
-      |
-      v
 payment_obligations
-      |
-      v
-credit_cards
       |
       v
 vw_monthly_payments
@@ -213,9 +220,9 @@ vw_monthly_payments
 Apache Superset
 ```
 
-`payment_obligations` provides the payment-level semantic representation.
+`payment_obligations` provides the resolved payment amount, payment due date, and obligation classification used by the analytical view.
 
-`credit_cards` provides the applicable credit-card reference information used by the analytical view.
+`payment_due` is the authoritative payment timing used by the view. The view does not reconstruct payment timing from `credit_cards`.
 
 ### Grain
 
@@ -228,20 +235,20 @@ Multiple payment obligations may contribute to a single row when they share the 
 The view depends on:
 
 - `payment_obligations`
-- `credit_cards`
 
-The payment-obligation layer provides the payment amounts represented by the analytical dataset.
+The payment-obligation layer provides the payment amounts, payment due dates, and obligation classifications represented by the analytical dataset.
 
 ### Transformation Logic
 
 The view performs the following conceptual steps:
 
 1. Reads the payment obligations represented by `payment_obligations`.
-2. Resolves the applicable credit-card reference information.
-3. Groups payment obligations by payment timing.
-4. Aggregates the payment amounts.
-5. Counts the payment obligations represented by each group.
-6. Produces the monthly payment analytical dataset.
+2. Uses `payment_due` as the resolved payment date.
+3. Derives `payment_day` from the day of `payment_due`.
+4. Groups payment obligations by payment timing and obligation type.
+5. Aggregates the payment amounts.
+6. Counts the represented transactions/obligations.
+7. Produces the monthly payment analytical dataset.
 
 The exact SQL implementation is maintained separately from this documentation. This document describes the analytical contract and transformation behavior rather than duplicating the implementation.
 
@@ -254,10 +261,11 @@ The view provides:
 | `monthyear` | Formatted payment month/year representation |
 | `year` | Payment year |
 | `month` | Payment month |
-| `payment_day` | Payment day associated with the payment group |
-| `payment_due` | Payment due date |
+| `payment_day` | Day derived from `payment_due` |
+| `payment_due` | Resolved payment due date |
 | `total_payment` | Aggregated payment amount |
 | `transaction_count` | Count represented by the payment group |
+| `obligation_type` | Payment-obligation classification represented by the group |
 
 ### Superset Usage
 
@@ -265,7 +273,7 @@ The view provides:
 
 - **Line Chart — Monthly Payments**
 
-This visualization provides a monthly view of aggregated credit-card payment amounts.
+This visualization provides a monthly view of aggregated payment amounts based on resolved payment obligations.
 
 ---
 
@@ -295,7 +303,7 @@ Superset consumes PostgreSQL analytical datasets rather than querying the FastAP
 The current visualization datasets are:
 
 - `vw_transactions` for transaction-level reporting and visualization
-- `vw_monthly_payments` for monthly credit-card payment reporting
+- `vw_monthly_payments` for payment-obligation and monthly payment reporting
 
 The current reporting and visualization flow is:
 
@@ -332,21 +340,23 @@ The core tables store the platform's underlying financial data and relationships
 - `credit_cards`
 - `installment_plans`
 - `installment_schedule`
+- `recurring_expenses`
+- `recurring_schedule`
 
 These tables support the application's operational data requirements.
 
 ### Payment Semantic Layer
 
-`payment_obligations` provides the current credit-card payment-level semantic representation.
+`payment_obligations` provides the current payment-obligation semantic representation.
 
-It separates the concept of the original spending event from the payment obligations used for credit-card payment analysis.
+It separates the concept of the original spending event from the payment obligations used for payment analysis, including single-payment, installment, and recurring obligations.
 
 ### Analytical Views
 
 Analytical views provide derived datasets for reporting and visualization:
 
-- `vw_transactions` provides an enriched transaction-level dataset.
-- `vw_monthly_payments` provides aggregated monthly credit-card payment information.
+- `vw_transactions` provides an enriched transaction-level dataset, including `obligation_type`.
+- `vw_monthly_payments` provides aggregated payment information based on resolved `payment_obligations.payment_due`.
 
 ### Apache Superset
 
@@ -401,10 +411,12 @@ The current analytics layer supports:
 - payment-source analysis
 - category analysis
 - daily expense reporting
-- credit-card payment-level semantics through `payment_obligations`
-- monthly credit-card payment analysis through `vw_monthly_payments`
+- transaction-obligation classification through `obligation_type`
+- payment-obligation semantics for single-payment, installment, and recurring obligations
+- monthly payment analysis through `vw_monthly_payments`
 - aggregation of payment amounts and payment-obligation counts
 - Apache Superset reporting and visualization
+- recurring-generated transactions participating in the existing analytical layer
 
 The analytics layer does not implement:
 
@@ -413,4 +425,5 @@ The analytics layer does not implement:
 - installment modification
 - automatic historical conversion of existing transactions
 - cash-flow forecasting
-- universal payment obligations across all payment types
+- a dedicated recurring-expense analytical view
+- a dedicated recurring-expense Superset dashboard

@@ -22,7 +22,7 @@ Apache Superset is the current reporting and visualization platform for the proj
 | Backend | Python / FastAPI |
 | Frontend | HTML / CSS / JavaScript |
 | Analytics & Visualization | Apache Superset |
-| Current Milestone | V1 Credit-Card Installments implemented and verified |
+| Current Milestone | Recurring Expenses & Transaction Obligation Model |
 
 ## What I Built
 
@@ -31,10 +31,11 @@ The platform currently provides:
 - A web interface for transaction capture
 - A FastAPI backend for request handling and validation
 - PostgreSQL as the structured data layer and source of truth
-- Relational data modeling for transactions, payment sources, credit cards, and installment relationships
+- Relational data modeling for transactions, payment sources, credit cards, installment relationships, and recurring commitments
 - Optional credit-card installment scheduling
 - Database-controlled installment payment-date and allocation logic
-- A credit-card payment-level semantic layer for payment-oriented analytics
+- Database-controlled recurring schedule generation and future-dated transaction materialization
+- A payment-obligation semantic layer covering single-payment, installment, and recurring payment obligations
 - PostgreSQL analytical views for reporting and visualization
 - Apache Superset as the current reporting and visualization platform
 - Application authentication and API authentication
@@ -66,6 +67,8 @@ PostgreSQL
  |     +-- credit_cards
  |     +-- installment_plans
  |     +-- installment_schedule
+ |     +-- recurring_expenses
+ |     +-- recurring_schedule
  |
  +-- Payment Semantic Layer
  |     |
@@ -88,11 +91,46 @@ PostgreSQL
 3. The validated transaction is stored in PostgreSQL.
 4. For eligible credit-card transactions, an optional installment request can be submitted.
 5. PostgreSQL creates the installment plan and derived installment schedule using the database-controlled installment process.
-6. The `payment_obligations` layer represents the current credit-card payment obligations.
+6. The `payment_obligations` layer represents the applicable payment obligations for single-payment credit-card transactions, installment transactions, and recurring-generated transactions.
 7. PostgreSQL analytical views provide datasets for reporting and visualization.
 8. Apache Superset consumes the analytical views for reporting and visualization.
 
 The original transaction remains the source of truth for the spending event. Installment records represent derived payment obligations rather than additional purchases.
+
+### Recurring Expenses
+
+Recurring expenses are implemented as bounded financial commitments that generate scheduled occurrences and future-dated transaction records.
+
+The implemented flow is:
+
+```text
+recurring_expenses
+        |
+        v
+AFTER INSERT trigger
+        |
+        v
+recurring_schedule
+        |
+        v
+future-dated transactions
+        |
+        v
+payment_obligations
+        |
+        v
+analytical views / Superset
+```
+
+Creating a recurring expense causes the database-controlled recurring process to generate its bounded schedule and materialize the corresponding future-dated transaction records.
+
+The generated transactions use the scheduled payment date as their `transaction_date` and are classified using:
+
+```text
+obligation_type = RECURRING
+```
+
+The recurring schedule maintains its relationship to the recurring definition through `recurring_id`. The current implementation does not maintain a persistent foreign-key relationship between `recurring_schedule` and generated transactions.
 
 Apache Superset is the current reporting and visualization platform.
 
@@ -113,21 +151,34 @@ The platform separates original spending events from derived payment information
 
 ### Core Data Model
 
-- `transactions` — original financial spending events
+- `transactions` — original financial spending events and generated future-dated recurring transaction records
 - `payment_sources` — reusable payment-source reference data
 - `credit_cards` — credit-card-specific reference information
 - `installment_plans` — relationship between an original transaction and an installment plan
 - `installment_schedule` — derived installment payment allocations
-- `payment_obligations` — current credit-card payment-level semantic layer
+- `recurring_expenses` — bounded recurring financial commitments
+- `recurring_schedule` — scheduled occurrences generated from recurring definitions
+- `payment_obligations` — payment-obligation semantic layer for single-payment, installment, and recurring obligations
+
+Transactions use the system-derived `obligation_type` classification:
+
+- `NORMAL` — normal non-recurring transaction
+- `SINGLE_PAYMENT` — credit-card transaction without installments
+- `RECURRING` — transaction generated from a recurring expense
+- `INSTALLMENT` — credit-card transaction associated with an installment plan
+
+The `obligation_type` value is derived by the system and is not a user-controlled frontend field.
 
 ### Analytical Views
 
 PostgreSQL provides purpose-specific analytical views used by Apache Superset:
 
-- `vw_transactions` — transaction-level dataset enriched with the human-readable payment source name
-- `vw_monthly_payments` — aggregated credit-card payment-level dataset based on `payment_obligations`
+- `vw_transactions` — transaction-level dataset enriched with the human-readable payment source name and `obligation_type`
+- `vw_monthly_payments` — aggregated payment-level dataset based on resolved `payment_obligations`
 
 The analytical views provide reporting-oriented datasets without replacing the operational tables.
+
+`vw_monthly_payments` uses the resolved `payment_due` from `payment_obligations` rather than reconstructing payment timing from credit-card reference data.
 
 ## Credit-Card Installments
 
@@ -197,6 +248,10 @@ The API accepts an optional `installment_count` when creating a transaction.
 
 When an installment request is submitted, the application creates the original transaction and invokes `create_installment_plan()` within the same database transaction.
 
+Recurring expenses are currently created through the database-controlled recurring process rather than through a dedicated recurring-expense CRUD API in the application.
+
+Recurring-generated transactions are retained in the canonical `transactions` table but are excluded from the application's normal recent-expense display.
+
 If installment creation fails, the transaction is rolled back.
 
 See [`docs/api.md`](docs/api.md) for the API design and endpoint documentation.
@@ -214,26 +269,34 @@ Used for transaction-level reporting and visualization, including:
 - Categorical Transactions
 - Daily Expenses
 
+The view also exposes `obligation_type`, allowing downstream reporting to distinguish normal, single-payment, recurring, and installment transaction records.
+
 ### `vw_monthly_payments`
 
-Used for monthly credit-card payment reporting.
+Used for monthly payment reporting.
 
-It consumes the current `payment_obligations` semantic layer and provides aggregated payment-level information for Superset.
+It consumes the current `payment_obligations` semantic layer and provides aggregated payment-level information for Superset using the resolved `payment_due`.
+
+Recurring-generated transactions participate in the existing analytical layer through `payment_obligations`, `vw_transactions`, and `vw_monthly_payments`. A dedicated recurring-expense analytical view or dedicated recurring Superset dashboard is not currently part of the implementation.
 
 ### Current Reporting Flow
 
 ```text
 PostgreSQL
     |
-    +-- vw_transactions
+    +-- transactions
+    |       |
+    |       +-- vw_transactions
     |
-    +-- vw_monthly_payments
-             |
-             v
-      Apache Superset
-             |
-             v
-    Reporting & Visualization
+    +-- payment_obligations
+            |
+            +-- vw_monthly_payments
+                     |
+                     v
+              Apache Superset
+                     |
+                     v
+            Reporting & Visualization
 ```
 
 ### Project Screenshots
@@ -246,7 +309,7 @@ The repository includes screenshots of the implemented application and reporting
 
 #### Financial Intelligence Dashboard
 
-![Financial Intelligence Dashboard](screenshots/Financial-Intelligence-Dashboard.jpg)
+![Financial Intelligence Dashboard](screenshots/data-platform.jpg)
 
 #### FastAPI Application
 
@@ -285,26 +348,29 @@ requirements.txt        Python dependencies
 ## Documentation
 
 - [`Architecture`](docs/architecture.md) — system architecture, layers, and data flow
-- [`Data Model`](docs/data-model.md) — database structure, installment model, and payment-obligation semantics
+- [`Data Model`](docs/data-model.md) — database structure, installment model, recurring model, and payment-obligation semantics
 - [`Analytics`](docs/analytics.md) — analytical views and Superset dataset usage
 - [`API Documentation`](docs/api.md) — API endpoints, transaction creation, and installment flow
 - [`Technical Decisions`](docs/technical-decisions.md) — key technology and architecture decisions
 
 ## Current Status
 
-The V1 Credit-Card Installments implementation has been completed and verified. The application, PostgreSQL data layer, payment-obligation semantics, analytical views, and Apache Superset reporting and visualization layer are operational.
+The V1 Credit-Card Installments, Category Standardization, and Recurring Expenses & Transaction Obligation Model implementations have been completed and verified.
 
 The current implementation includes:
 
 - Transaction capture and retrieval
 - Credit-card installment scheduling
 - Database-controlled payment-date and installment allocation logic
-- Credit-card payment-obligation semantics
+- Recurring expense schedule generation
+- Future-dated recurring transaction materialization
+- System-derived transaction obligation classification
+- Payment-obligation semantics for single-payment, installment, and recurring transactions
 - Transaction-level analytical reporting
-- Monthly credit-card payment reporting
+- Monthly payment reporting
 - Apache Superset visualization
 
-The implementation and supporting technical documentation have been integrated into `main`.
+The current project phase is documentation and final project-state alignment.
 
 The platform provides a foundation for structured financial transaction data and payment-level analytics while remaining extensible for future financial use cases.
 
@@ -317,12 +383,10 @@ Future development can extend the platform toward:
 - Data transformation and validation workflows
 - Expanded reporting capabilities
 - Additional automation around transaction processing
-- Recurring financial commitments and scheduled transaction generation
 - More advanced financial insights
+- Future recurring-expense management capabilities such as explicit correction or deletion lineage
 
-The approved recurring-expense architecture separates recurring commitments from actual financial transactions. Recurring definitions produce scheduled future occurrences, which are materialized into the canonical `transactions` domain when their payment dates are reached.
-
-Recurring expenses are an approved architectural direction and are not represented as implemented functionality until the corresponding database and application development is completed.
+Recurring expenses are implemented functionality. The current V1 model uses bounded recurring definitions, generated schedules, and future-dated transaction materialization through the database-controlled recurring process.
 
 Future capabilities should be treated as planned extensions rather than current functionality unless implemented and documented.
 

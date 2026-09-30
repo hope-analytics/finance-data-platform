@@ -42,6 +42,10 @@ PostgreSQL
   |     +-- installment_plans
   |     |
   |     +-- installment_schedule
+  |     |
+  |     +-- recurring_expenses
+  |     |
+  |     +-- recurring_schedule
   |
   +-- Payment Semantic Layer
   |     |
@@ -69,30 +73,44 @@ PostgreSQL
 7. Credit-card-specific information is maintained separately in the `credit_cards` reference table.
 8. When a credit-card transaction includes an installment request, FastAPI invokes the database-controlled `create_installment_plan()` function.
 9. The database uses the authoritative transaction amount to create the corresponding `installment_plans` and `installment_schedule` records.
-10. The `payment_obligations` view provides the current credit-card payment-level semantic representation, distinguishing normal credit-card obligations from installment obligations.
+10. The `payment_obligations` layer represents the applicable payment obligations for single-payment credit-card transactions, installment transactions, and recurring-generated transactions.
 11. PostgreSQL analytical views provide datasets for analytics and reporting.
 12. Apache Superset connects to PostgreSQL and uses the analytical views for reporting and visualization.
 
 The original transaction remains the source of truth for the spending event. Installment schedule records represent derived payment obligations rather than additional purchases.
 
-The platform also supports the architectural concept of bounded recurring commitments:
+The platform also supports bounded recurring commitments:
 
 ```text
 recurring_expenses
         |
         v
-recurring_schedule
+AFTER INSERT trigger
         |
-        | scheduled occurrence
-        v
-transactions
+        +-----------------------------+
+        |                             |
+        v                             v
+generate_recurring_schedule()  generate_recurring_transactions()
+        |                             |
+        v                             v
+recurring_schedule              future-dated transactions
+                                      |
+                                      v
+                              obligation_type = RECURRING
+                                      |
+                                      v
+                              payment_obligations
 ```
 
-The recurring definition establishes the commitment, while the recurring schedule makes future occurrences visible before their transaction dates occur.
+Creating a recurring expense causes the database-controlled recurring process to generate its bounded schedule and immediately materialize the corresponding future-dated transaction records.
 
-When an occurrence reaches its scheduled payment date, the backend materializes it into the `transactions` table. The generated record follows the normal transaction structure and is classified as `RECURRING`.
+The generated transactions use the scheduled `payment_date` as their `transaction_date` and are classified as:
 
-The transaction remains the canonical financial event. The recurring schedule provides the lineage back to the recurring definition.
+```text
+obligation_type = RECURRING
+```
+
+The recurring schedule maintains its relationship to the recurring definition through `recurring_id`. The current implementation does not maintain a persistent foreign-key relationship between `recurring_schedule` and generated transactions.
 
 ## Application Layer
 
@@ -130,6 +148,10 @@ The application accepts an optional `installment_count` for transaction creation
 
 FastAPI does not independently calculate installment amounts, installment payment dates, or payment-obligation aggregations. These responsibilities remain within the database implementation.
 
+Recurring expenses are currently created through the database-controlled recurring process rather than through a dedicated recurring-expense CRUD API in the application.
+
+The application excludes `RECURRING` transactions from its normal recent-expense display. The generated recurring records remain in the canonical `transactions` table.
+
 ## Database Layer
 
 PostgreSQL provides persistent storage, relational integrity, payment-obligation processing, and analytical datasets for the platform.
@@ -149,6 +171,7 @@ The `transactions` table stores the core financial transaction records:
 - `payment_source_id`
 - `notes`
 - `created_at`
+- `obligation_type`
 
 The transaction identifier is generated automatically using a PostgreSQL identity column.
 
@@ -156,36 +179,52 @@ Financial amounts use `NUMERIC(12,2)` to preserve decimal precision.
 
 The original transaction remains the authoritative spending record. Creating an installment plan does not create additional spending transactions.
 
+`obligation_type` is a system-derived classification used to distinguish the implemented transaction contexts:
+
+- `NORMAL` — normal non-recurring transaction
+- `SINGLE_PAYMENT` — credit-card transaction without installments
+- `RECURRING` — transaction generated from a recurring expense
+- `INSTALLMENT` — credit-card transaction associated with an installment plan
+
+The value is derived by the application or database-controlled process as appropriate and is not a user-controlled frontend field.
+
 ### Recurring Expenses
 
 Recurring expenses represent predefined recurring financial commitments.
 
-The recurring-expense model separates the definition of a recurring commitment from the actual financial transactions generated by that commitment.
+The recurring-expense model separates the definition of a recurring commitment from the future-dated financial transactions generated by that commitment.
 
-The conceptual flow is:
+The implemented flow is:
 
 ```text
 recurring_expenses
         |
         v
-recurring_schedule
+AFTER INSERT trigger
         |
-        | scheduled occurrence
-        v
-transactions
+        +-----------------------------+
+        |                             |
+        v                             v
+generate_recurring_schedule()  generate_recurring_transactions()
+        |                             |
+        v                             v
+recurring_schedule              transactions
+                                      |
+                                      v
+                              obligation_type = RECURRING
 ```
 
 `recurring_expenses` stores the definition of the recurring commitment.
 
-`recurring_schedule` stores the future scheduled occurrences associated with that recurring definition. Each schedule occurrence retains its `recurring_id` so that the scheduled event remains traceable to its originating recurring expense.
+`recurring_schedule` stores the scheduled occurrences associated with that recurring definition. Each schedule occurrence retains its `recurring_id` so that the scheduled event remains traceable to its originating recurring expense.
 
-When a scheduled occurrence reaches its payment date, the backend materializes the occurrence as a normal record in `transactions`.
+The database-controlled recurring process materializes the generated occurrences into `transactions` immediately after the recurring expense is created. The generated transaction uses the scheduled `payment_date` as its `transaction_date`.
 
 The resulting transaction remains part of the canonical transaction domain. Recurring expenses therefore do not introduce a separate transaction table.
 
-The transaction is classified using `obligation_type = RECURRING`, while the recurring schedule retains the lineage to the originating recurring definition.
+The current implementation does not maintain a persistent foreign-key relationship between `recurring_schedule` and generated transactions. The schedule-to-definition relationship is maintained through `recurring_id`; there is no transaction FK on `recurring_schedule`.
 
-The recurring model is bounded by a contract period represented by a start date and an end date. The schedule provides visibility into future recurring occurrences within that period before those occurrences become actual transactions.
+The recurring model is bounded by a contract period represented by a start date and an end date.
 
 Automatic renewal is not part of the approved architecture.
 
@@ -278,27 +317,28 @@ The original transaction creation and installment-plan creation occur within the
 
 ### Payment Obligations
 
-`payment_obligations` is the current **credit-card payment-level semantic layer**.
+`payment_obligations` is the current payment-obligation semantic layer.
 
 Its current implementation represents:
 
-- a normal credit-card payment obligation for a non-installment credit-card transaction; or
-- installment payment obligations for a credit-card transaction with an installment plan.
+- a normal credit-card payment obligation for a non-installment credit-card transaction;
+- installment payment obligations for a credit-card transaction with an installment plan; or
+- recurring payment obligations for transactions generated from recurring expenses.
 
 An installment transaction does not additionally produce a normal full-amount credit-card payment obligation.
 
-The current `payment_obligations` view does not provide payment obligations for non-credit-card payment sources.
+The current `payment_obligations` implementation does not provide payment obligations for non-credit-card payment sources.
 
-This semantic layer separates the original spending event from the payment obligations used for credit-card payment analysis.
+This semantic layer separates the original spending event from the payment obligations used for payment-level analysis.
 
 ### Analytical Views
 
 PostgreSQL provides analytical views used by Apache Superset.
 
-- `vw_transactions` provides transaction-level data enriched with the human-readable `payment_name` from `payment_sources`.
-- `vw_monthly_payments` provides aggregated credit-card payment-level data based on the current `payment_obligations` semantic layer.
+- `vw_transactions` provides transaction-level data enriched with the human-readable `payment_name` from `payment_sources` and the system-derived `obligation_type`.
+- `vw_monthly_payments` provides aggregated payment-level data based on the current `payment_obligations` semantic layer.
 
-`vw_monthly_payments` consumes the payment-obligation representation rather than independently recreating installment or payment-obligation logic from the underlying transaction records.
+`vw_monthly_payments` consumes resolved `payment_due` values from `payment_obligations`. It does not independently reconstruct payment timing from `credit_cards`.
 
 ## Analytics Layer
 
@@ -309,7 +349,7 @@ Superset connects directly to PostgreSQL rather than to the web application. Thi
 The current analytical datasets are:
 
 - `vw_transactions` for transaction-level reporting and visualization
-- `vw_monthly_payments` for monthly credit-card payment reporting
+- `vw_monthly_payments` for payment-level reporting
 
 The conceptual analytical flow is:
 
@@ -340,6 +380,10 @@ vw_transactions
 Apache Superset
 ```
 
+Recurring-generated transactions participate in the existing analytical layer through `payment_obligations`, `vw_transactions`, and `vw_monthly_payments`.
+
+A dedicated recurring-expense analytical view or dedicated recurring Superset dashboard is not currently part of the implementation.
+
 ## Security
 
 The application uses environment variables for sensitive configuration rather than hardcoding credentials in source code.
@@ -367,7 +411,7 @@ Each layer has a defined responsibility:
 
 - Frontend: user interaction and transaction capture
 - FastAPI: application logic, validation, authentication, and database operation orchestration
-- PostgreSQL: persistent data storage, relational integrity, installment processing, payment-obligation semantics, and analytical datasets
+- PostgreSQL: persistent data storage, relational integrity, installment processing, recurring schedule and transaction generation, payment-obligation semantics, and analytical datasets
 - Apache Superset: reporting and visualization
 
 ### Separation of Spending and Payment Obligations
@@ -376,7 +420,7 @@ The original transaction represents the spending event.
 
 Installment plans and schedules represent the relationship and derived payment allocation associated with that spending event.
 
-The payment-obligation layer represents the current credit-card payment obligations used for payment-level analysis.
+The payment-obligation layer represents the current payment obligations used for payment-level analysis, including single-payment credit-card, installment, and recurring obligations.
 
 This prevents installment payments from being interpreted as separate purchases.
 
@@ -392,7 +436,7 @@ Credit-card-specific attributes are maintained separately in `credit_cards`.
 
 PostgreSQL acts as the central source of transaction data for both the application and analytics layer.
 
-The database also acts as the authority for installment payment-date calculation, installment schedule generation, and payment-obligation semantics.
+The database also acts as the authority for installment payment-date calculation, installment schedule generation, recurring schedule generation, recurring transaction materialization, and payment-obligation semantics.
 
 ### Analytical Separation
 
@@ -402,7 +446,7 @@ This allows the operational database model and the reporting layer to remain sep
 
 ### Extensibility
 
-The separation between transaction data, reference data, installment processing, payment obligations, application processing, and analytics provides a foundation for extending the platform with additional financial use cases.
+The separation between transaction data, reference data, installment processing, recurring commitments, payment obligations, application processing, and analytics provides a foundation for extending the platform with additional financial use cases.
 
 ### Portfolio Focus
 
@@ -410,11 +454,13 @@ The platform demonstrates how an application can capture structured business dat
 
 ### Recurring Commitment Separation
 
-Recurring commitments are separated from actual financial events.
+Recurring commitments are separated from actual financial events at the definition level.
 
-`recurring_expenses` defines the recurring commitment, while `recurring_schedule` represents its future scheduled occurrences. When an occurrence reaches its payment date, it is materialized into the canonical `transactions` domain.
+`recurring_expenses` defines the recurring commitment, while `recurring_schedule` represents its scheduled occurrences. The database-controlled recurring process materializes the generated occurrences into the canonical `transactions` domain immediately after the recurring definition is created.
 
-This allows future recurring activity to be visible before the transaction date while keeping `transactions` as the source of truth for actual financial events.
+This allows future-dated recurring activity to exist in the canonical transaction domain while keeping the recurring definition and schedule as the source of the recurring commitment.
+
+The current physical model maintains schedule-to-definition lineage through `recurring_schedule.recurring_id`. It does not maintain a persistent foreign-key relationship from `recurring_schedule` to generated transactions.
 
 Recurring expenses and installments remain separate mechanisms:
 
@@ -424,7 +470,9 @@ recurring_expenses
         ↓
 recurring_schedule
         ↓
-transactions
+future-dated transactions
+        ↓
+payment_obligations
 
 Installment:
 transactions
@@ -432,9 +480,11 @@ transactions
 installment_plans
         ↓
 installment_schedule
+        ↓
+payment_obligations
 ```
 
-A recurring expense is a predefined recurring commitment that generates future transaction occurrences.
+A recurring expense is a predefined recurring commitment that generates future-dated transaction occurrences.
 
 An installment originates from an actual transaction and distributes its payment across future installment occurrences.
 

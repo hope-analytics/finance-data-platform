@@ -56,7 +56,7 @@ CREATE TABLE transactions (
     
     CONSTRAINT transactions_category_fk
         FOREIGN KEY (category_id)
-        REFERENCES transaction_category(category_id),
+        REFERENCES transactions_category(category_id),
 
     CONSTRAINT transactions_obligation_type_check
         CHECK (
@@ -422,7 +422,7 @@ GROUP BY
 ORDER BY
     po.payment_due DESC;
 
-CREATE TABLE transaction_category (
+CREATE TABLE transactions_category (
     category_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     category_name VARCHAR(100) NOT NULL,
     CONSTRAINT category_table_name_unique UNIQUE (category_name)
@@ -515,8 +515,8 @@ CREATE TABLE recurring_schedule (
         UNIQUE (recurring_id, occurrence_number)
 );
 
-CREATE INDEX idx_recurring_Schedule_payment_date
-    ON recurring_schedule(payement_date)
+CREATE INDEX idx_recurring_schedule_payment_date
+    ON recurring_schedule(payment_date)
 ;
 
 CREATE INDEX idx_recurring_schedule_status
@@ -735,25 +735,3 @@ AFTER INSERT
 ON recurring_expenses
 FOR EACH ROW
 EXECUTE FUNCTION trg_materialize_recurring_expense();
-
-INSERT INTO recurring_expenses (
-    merchant,
-    description,
-    amount,
-    category,
-    payment_source_id,
-    contract_start_date,
-    contract_end_date,
-    status
-)
-VALUES (
-    'TEST Trigger Chain',
-    'Verify automatic trigger chain',
-    500.00,
-    'TEST',
-    2,
-    DATE '2026-10-01',
-    DATE '2026-12-01',
-    'ACTIVE'
-)
-RETURNING recurring_id;
