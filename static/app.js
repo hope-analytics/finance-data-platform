@@ -9,8 +9,25 @@ const installmentGroup = document.getElementById("installmentGroup");
 const installmentCount = document.getElementById("installment_count");
 const categoryInput = document.getElementById("category");
 const categoryOptions = document.getElementById("categoryOptions");
+const ownerSelect = document.getElementById("owner_id");
+const participantsDropdown = document.getElementById("participantsDropdown");
+const participantsDropdownButton = document.getElementById("participantsDropdownButton");
+const participantsDropdownPanel = document.getElementById("participantsDropdownPanel");
+const participantsDropdownLabel = document.getElementById("participantsDropdownLabel");
+const participantChecklist = document.getElementById("participantChecklist");
 
 let selectedPaymentType = null;
+
+function updateInstallmentVisibility() {
+    const isCreditCard = selectedPaymentType === "CREDIT_CARD";
+
+    installmentGroup.hidden = !isCreditCard;
+    installmentCount.disabled = !isCreditCard;
+
+    if (!isCreditCard) {
+        installmentCount.value = "";
+    }
+}
 
 // ---------------------------------
 // Set today's date
@@ -31,17 +48,35 @@ function setToday() {
 // Installment visibility
 // ---------------------------------
 
-function updateInstallmentVisibility() {
+function updateParticipantsLabel() {
+    const selected = participantChecklist.querySelectorAll(
+        'input[name="participant_ids"]:checked'
+    );
 
-    const isCreditCard =
-        selectedPaymentType === "CREDIT_CARD";
-
-    installmentGroup.hidden = !isCreditCard;
-
-    if (!isCreditCard) {
-        installmentCount.value = "";
+    if (selected.length === 0) {
+        participantsDropdownLabel.textContent = "Select participants";
+    } else if (selected.length === 1) {
+        participantsDropdownLabel.textContent = "1 participant selected";
+    } else {
+        participantsDropdownLabel.textContent =
+            `${selected.length} participants selected`;
     }
 }
+
+participantsDropdownButton.addEventListener("click", () => {
+    const isOpen = !participantsDropdownPanel.hidden;
+
+    participantsDropdownPanel.hidden = isOpen;
+    participantsDropdownButton.setAttribute("aria-expanded", String(!isOpen));
+});
+
+document.addEventListener("click", (event) => {
+    if (!participantsDropdown.contains(event.target)) {
+        participantsDropdownPanel.hidden = true;
+        participantsDropdownButton.setAttribute("aria-expanded", "false");
+    }
+});
+
 
 // ---------------------------------
 // Show message
@@ -163,6 +198,80 @@ async function loadExpenses() {
     }
 }
 
+async function loadPeople() {
+    ownerSelect.disabled = true;
+    participantsDropdownButton.disabled = true;
+
+    try {
+        const response = await fetch("/app/people");
+        const data = await parseResponse(response);
+
+        if (!response.ok) {
+            throw new Error(
+                data?.detail ||
+                `People request failed (HTTP ${response.status}).`
+            );
+        }
+
+        if (!Array.isArray(data)) {
+            console.error("Expected an array of people, received:", data);
+            throw new Error("The people API returned an unexpected response.");
+        }
+
+        ownerSelect.replaceChildren(
+            new Option(
+                data.length === 0
+                    ? "No people available"
+                    : "Select an owner",
+                ""
+            )
+        );
+
+        participantChecklist.replaceChildren();
+
+        data.forEach((person) => {
+            const ownerOption = new Option(
+                person.name,
+                String(person.person_id)
+            );
+            ownerSelect.add(ownerOption);
+
+            const label = document.createElement("label");
+            label.className = "participant-option";
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.name = "participant_ids";
+            checkbox.value = String(person.person_id);
+            checkbox.addEventListener("change", updateParticipantsLabel);
+
+            const name = document.createElement("span");
+            name.textContent = person.name;
+
+            label.append(checkbox, name);
+            participantChecklist.appendChild(label);
+        });
+
+        updateParticipantsLabel();
+
+        if (data.length === 0) {
+            showMessage("No household members are available.", "error");
+        }
+    } catch (error) {
+        ownerSelect.replaceChildren(
+            new Option("Unable to load people", "")
+        );
+        participantChecklist.replaceChildren();
+        updateParticipantsLabel();
+
+        showMessage(error.message, "error");
+        console.error("People loading failed:", error);
+    } finally {
+        ownerSelect.disabled = false;
+        participantsDropdownButton.disabled = false;
+    }
+}
+
 // ---------------------------------
 // Basic HTML escaping
 // ---------------------------------
@@ -225,27 +334,36 @@ form.addEventListener("submit", async function(event) {
     message.className = "message";
 
     const expense = {
-
         transaction_date:
             document.getElementById("transaction_date").value,
-
+    
         merchant:
             document.getElementById("merchant").value.trim(),
-
+    
         description:
             document.getElementById("description").value.trim() || null,
-
+    
         amount:
             document.getElementById("amount").value,
-
+    
         category:
             categoryInput.value.trim() || null,
-
+    
         payment_source_id:
             Number(paymentSourceId.value),
-
+    
         notes:
-            document.getElementById("notes").value.trim() || null
+            document.getElementById("notes").value.trim() || null,
+    
+        owner_id:
+            Number(ownerSelect.value),
+
+        participant_ids: Array.from(
+            participantChecklist.querySelectorAll(
+                'input[name="participant_ids"]:checked'
+            )
+        ).map((checkbox) => Number(checkbox.value))
+
     };
 
     if (
@@ -286,19 +404,30 @@ form.addEventListener("submit", async function(event) {
         // Reset form
         form.reset();
 
+        participantChecklist
+            .querySelectorAll('input[name="participant_ids"]')
+            .forEach((checkbox) => {
+                checkbox.checked = false;
+            });
+
+        updateParticipantsLabel();
+
+        participantsDropdownPanel.hidden = true;
+        participantsDropdownButton.setAttribute("aria-expanded", "false");
+
         // Put today's date back
+        
         setToday();
 
+        // Reset Payment Source state.
+
         paymentSourceId.value = "";
-
-        paymentOptionsContainer
-            .querySelectorAll(".payment-option")
-            .forEach(option => option.classList.remove("selected"));
-
         selectedPaymentType = null;
-
         installmentCount.value = "";
-            
+        updateInstallmentVisibility();
+
+        // Reset installment state.
+        installmentCount.value = "";
         updateInstallmentVisibility();
 
         // Put cursor back on merchant
@@ -339,8 +468,14 @@ refreshButton.addEventListener(
 
 async function initializeApp() {
     setToday();
-    await loadPaymentSources();
-    await loadCategories();
+    updateInstallmentVisibility();
+
+    await Promise.allSettled([
+        loadPaymentSources(),
+        loadCategories(),
+        loadPeople()
+    ]);
+
     await loadExpenses();
 }
 
@@ -349,69 +484,74 @@ window.addEventListener("load", initializeApp);
 // Load payment sources
 // ---------------------------------
 
+
 async function loadPaymentSources() {
+    paymentSourceId.disabled = true;
+    paymentSourceId.replaceChildren(
+        new Option("Loading payment sources...", "")
+    );
 
     try {
-
         const response = await fetch("/app/payment-sources");
+        const data = await parseResponse(response);
 
         if (!response.ok) {
-
-            const data = await parseResponse(response);
-
             throw new Error(
-                data.detail || "Failed to load payment sources"
+                data?.detail || "Failed to load payment sources."
             );
         }
 
-        const paymentSources = await parseResponse(response);
-
-        paymentOptionsContainer.innerHTML = "";
-
-        paymentSources.forEach(source => {
-
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "payment-option";
-            button.dataset.value = source.payment_source_id;
-            button.setAttribute("aria-pressed", "false")
-            button.textContent = source.payment_name;
-
-            button.addEventListener("click", () => {
-
-                paymentSourceId.value = source.payment_source_id;
-
-                selectedPaymentType = source.payment_type;
-                updateInstallmentVisibility();
-
-                paymentOptionsContainer
-                    .querySelectorAll(".payment-option")
-                    .forEach(option => {
-                        option.classList.remove("selected");
-                        option.setAttribute("aria-pressed", "false");
-                    });
-
-                button.classList.add("selected");
-                button.setAttribute("aria-pressed", "true");
-
-            });
-
-            paymentOptionsContainer.appendChild(button);
-        });
-
-        if (paymentSources.length === 0) {
-            paymentOptionsContainer.innerHTML =
-                `<p class="empty">No payment sources are available.</p>`;
+        if (!Array.isArray(data)) {
+            throw new Error("Unexpected payment sources response.");
         }
 
+        paymentSourceId.replaceChildren(
+            new Option(
+                data.length
+                    ? "Choose a payment source"
+                    : "No payment sources available",
+                ""
+            )
+        );
+
+        data.forEach((source) => {
+            const option = new Option(
+                source.payment_name,
+                String(source.payment_source_id)
+            );
+
+            option.dataset.paymentType = source.payment_type;
+            paymentSourceId.add(option);
+        });
+
+        paymentSourceId.disabled = data.length === 0;
+        selectedPaymentType = null;
+        updateInstallmentVisibility();
+
     } catch (error) {
-
-        paymentOptionsContainer.innerHTML =
-            `<p class="empty">Unable to load payment sources.</p>`;
-
         console.error(error);
+
+        paymentSourceId.replaceChildren(
+            new Option("Unable to load payment sources", "")
+        );
+        paymentSourceId.disabled = true;
+
+        showMessage(
+            "Unable to load payment sources. Please refresh and try again.",
+            "error"
+        );
     }
 }
+
+paymentSourceId.addEventListener("change", () => {
+    const selectedOption =
+        paymentSourceId.options[paymentSourceId.selectedIndex];
+
+    selectedPaymentType =
+        selectedOption?.dataset.paymentType || null;
+
+    updateInstallmentVisibility();
+});
 
 // ---------------------------------
 // Load categories

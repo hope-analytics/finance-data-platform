@@ -27,9 +27,9 @@
 
             <div class="form-grid">
 
-                <!-- Date -->
+                <!-- 1. Transaction date -->
                 <div class="form-group">
-                    <label for="transaction_date">Date</label>
+                    <label for="transaction_date">Transaction date</label>
                     <input
                         type="date"
                         id="transaction_date"
@@ -38,7 +38,7 @@
                     >
                 </div>
 
-                <!-- Merchant -->
+                <!-- 2. Merchant -->
                 <div class="form-group">
                     <label for="merchant">Merchant</label>
                     <input
@@ -51,7 +51,7 @@
                     >
                 </div>
 
-                <!-- Amount -->
+                <!-- 3. Amount -->
                 <div class="form-group">
                     <label for="amount">Amount</label>
                     <div class="amount-input">
@@ -68,53 +68,9 @@
                     </div>
                 </div>
 
-                <!-- Payment Source -->
-                <div class="form-group">
-                    <span class="form-label">Payment Source</span>
-
-                    <div
-                        class="payment-options"
-                        id="paymentOptions"
-                        role="group"
-                        aria-label="Payment source options"
-                    >
-                        <p class="loading">Loading payment sources...</p>
-                    </div>
-
-                    <input
-                        type="hidden"
-                        id="payment_source_id"
-                        name="payment_source_id"
-                        required
-                    >
-                </div>
-
-                <!-- Installments -->
-                <div
-                    class="form-group"
-                    id="installmentGroup"
-                    hidden
-                >
-                    <label for="installment_count">
-                        Installments
-                        <span class="optional">(optional)</span>
-                    </label>
-
-                    <input
-                        type="number"
-                        id="installment_count"
-                        name="installment_count"
-                        min="2"
-                        step="1"
-                        placeholder="e.g. 6"
-                        inputmode="numeric"
-                    >
-                </div>
-
-                <!-- Category -->
+                <!-- 4. Category -->
                 <div class="form-group">
                     <label for="category">Category</label>
-                
                     <input
                         type="text"
                         id="category"
@@ -123,17 +79,88 @@
                         placeholder="Select or enter a category"
                         autocomplete="off"
                     >
-                
                     <datalist id="categoryOptions"></datalist>
                 </div>
 
-                <!-- Description -->
+                <!-- 5. Payment source and optional installments -->
+                <div class="form-group payment-source-box">
+                    <label for="payment_source_id">Payment Source</label>
+
+                    <div id="paymentOptions">
+                        <select
+                            id="payment_source_id"
+                            name="payment_source_id"
+                            required
+                            disabled
+                        >
+                            <option value="">Loading payment sources...</option>
+                        </select>
+                    </div>
+
+                    <div id="installmentGroup" class="installment-group" hidden>
+                        <label for="installment_count">
+                            Installment plan
+                            <span class="optional">(optional)</span>
+                        </label>
+
+                        <input
+                            type="number"
+                            id="installment_count"
+                            name="installment_count"
+                            min="2"
+                            step="1"
+                            placeholder="Number of months, e.g. 6"
+                            inputmode="numeric"
+                        >
+
+                        <p class="field-hint">
+                            Only applies to credit-card purchases.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- 6. Owner -->
+                <div class="form-group">
+                    <label for="owner_id">Owner</label>
+                    <select id="owner_id" name="owner_id" required>
+                        <option value="">Loading people...</option>
+                    </select>
+                </div>
+
+                <!-- 7. Participants -->
+                <div class="form-group">
+                    <label for="participantsDropdownButton">Participants</label>
+
+                    <div class="participants-dropdown" id="participantsDropdown">
+                        <button
+                            type="button"
+                            id="participantsDropdownButton"
+                            class="participants-dropdown-button"
+                            aria-expanded="false"
+                            aria-controls="participantsDropdownPanel"
+                        >
+                            <span id="participantsDropdownLabel">
+                                Select participants
+                            </span>
+                            <span aria-hidden="true">▾</span>
+                        </button>
+
+                        <div
+                            id="participantsDropdownPanel"
+                            class="participants-dropdown-panel"
+                            hidden
+                        >
+                            <div id="participantChecklist"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 8. Description -->
                 <div class="form-group">
                     <label for="description">
                         Description
                         <span class="optional">(optional)</span>
                     </label>
-
                     <input
                         type="text"
                         id="description"
@@ -144,13 +171,12 @@
 
             </div>
 
-            <!-- Notes -->
-            <div class="form-group">
+            <!-- 9. Notes -->
+            <div class="form-group notes-group">
                 <label for="notes">
                     Notes
                     <span class="optional">(optional)</span>
                 </label>
-
                 <textarea
                     id="notes"
                     name="notes"
@@ -158,13 +184,13 @@
                     rows="3"
                 ></textarea>
             </div>
-
+            
             <button
-                type="submit"
-                id="saveButton"
-                class="save-button"
+            type="submit"
+            id="saveButton"
+            class="save-button"
             >
-                Save Expense
+            Save Expense
             </button>
 
         </form>

@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from typing import Optional
 from pydantic import BaseModel, Field
 
 load_dotenv("/Users/hopey/household-expenses/.env")
@@ -74,6 +75,9 @@ class ExpenseCreate(BaseModel):
     payment_source_id: int
     notes: Optional[str] = None
     installment_count: Optional[int] = Field(default=None, ge=2)
+
+    owner_id: int = Field(..., gt=0)
+    participant_ids: list[int] = Field(default_factory=list)
 
 # ---------------------------------
 # Authentication
@@ -168,8 +172,34 @@ def fetch_categories():
             cursor.execute(query)
             return cursor.fetchall()
 
-def create_expense(expense: ExpenseCreate):
+def fetch_people():
     query = """
+        SELECT
+            person_id,
+            name
+        FROM people
+        ORDER BY name, person_id
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query)
+            return cursor.fetchall()
+
+def create_expense(expense: ExpenseCreate):
+    if len(expense.participant_ids) != len(set(expense.participant_ids)):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Participant IDs must not contain duplicates.",
+        )
+
+    if any(person_id <= 0 for person_id in expense.participant_ids):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Participant IDs must be positive integers.",
+        )
+
+    insert_query = """
         INSERT INTO transactions (
             transaction_date,
             merchant,
@@ -178,7 +208,8 @@ def create_expense(expense: ExpenseCreate):
             category,
             payment_source_id,
             notes,
-            obligation_type
+            obligation_type,
+            owner_id
         )
         SELECT
             %s,
@@ -189,12 +220,14 @@ def create_expense(expense: ExpenseCreate):
             ps.payment_source_id,
             %s,
             CASE
-                WHEN ps.payment_type = 'CREDIT_CARD' AND %s IS NOT NULL
+                WHEN ps.payment_type = 'CREDIT_CARD'
+                     AND %s IS NOT NULL
                     THEN 'INSTALLMENT'
                 WHEN ps.payment_type = 'CREDIT_CARD'
                     THEN 'SINGLE_PAYMENT'
                 ELSE 'NORMAL'
-            END
+            END,
+            %s
         FROM payment_sources AS ps
         WHERE ps.payment_source_id = %s
           AND ps.active = TRUE
@@ -208,35 +241,104 @@ def create_expense(expense: ExpenseCreate):
             payment_source_id,
             notes,
             obligation_type,
+            owner_id,
+            participant_ids,
             created_at
     """
 
-    values = (
-        expense.transaction_date,
-        expense.merchant,
-        expense.description,
-        expense.amount,
-        expense.category,
-        expense.notes,
-        expense.installment_count,
-        expense.payment_source_id,
-    )
-
     with get_connection() as conn:
         try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, values)
+            with conn.cursor(
+                cursor_factory=RealDictCursor
+            ) as cursor:
+
+                # Validate owner against the reference table.
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM people
+                    WHERE person_id = %s
+                    """,
+                    (expense.owner_id,),
+                )
+
+                if cursor.fetchone() is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="The selected owner does not exist.",
+                    )
+
+                # Validate participant IDs before insertion.
+                if expense.participant_ids:
+                    cursor.execute(
+                        """
+                        SELECT person_id
+                        FROM people
+                        WHERE person_id = ANY(%s::BIGINT[])
+                        """,
+                        (expense.participant_ids,),
+                    )
+
+                    valid_ids = {
+                        row["person_id"]
+                        for row in cursor.fetchall()
+                    }
+
+                    invalid_ids = (
+                        set(expense.participant_ids) - valid_ids
+                    )
+
+                    if invalid_ids:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=(
+                                "One or more selected participants "
+                                "do not exist."
+                            ),
+                        )
+
+                cursor.execute(
+                    insert_query,
+                    (
+                        expense.transaction_date,
+                        expense.merchant,
+                        expense.description,
+                        expense.amount,
+                        expense.category,
+                        expense.notes,
+                        expense.installment_count,
+                        expense.owner_id,
+                        expense.payment_source_id,
+                    ),
+                )
 
                 result = cursor.fetchone()
 
                 if result is None:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Invalid or inactive payment source",
+                        detail="Invalid or inactive payment source.",
                     )
 
                 result = dict(result)
+                expense_id = result["expense_id"]
 
+                # Database function is the sole participant
+                # membership assignment mechanism.
+                cursor.execute(
+                    """
+                    SELECT set_transaction_participants(
+                        %s::BIGINT,
+                        %s::BIGINT[]
+                    )
+                    """,
+                    (
+                        expense_id,
+                        expense.participant_ids,
+                    ),
+                )
+
+                # Preserve existing installment creation behavior.
                 if expense.installment_count is not None:
                     cursor.execute(
                         """
@@ -246,27 +348,40 @@ def create_expense(expense: ExpenseCreate):
                         ) AS plan_id
                         """,
                         (
-                            result["expense_id"],
+                            expense_id,
                             expense.installment_count,
                         ),
                     )
 
                     installment_result = cursor.fetchone()
-                    
-                    result["installment_plan_id"] = installment_result["plan_id"]
+                    result["installment_plan_id"] = (
+                        installment_result["plan_id"]
+                    )
+
+                # Read back authoritative participant membership.
+                cursor.execute(
+                    """
+                    SELECT participant_ids
+                    FROM transactions
+                    WHERE expense_id = %s
+                    """,
+                    (expense_id,),
+                )
+
+                result["participant_ids"] = (
+                    cursor.fetchone()["participant_ids"]
+                )
 
             conn.commit()
-
             return result
 
         except HTTPException:
             conn.rollback()
             raise
-        
-        except Exception as exc:
+
+        except Exception:
             conn.rollback()
             raise
-
 
 # ---------------------------------
 # Security headers
@@ -345,6 +460,12 @@ def app_categories(
 ):
     return fetch_categories()
 
+@app.get("/app/people")
+def app_people(
+    _: str = Depends(verify_basic_auth),
+):
+    return fetch_people()
+
 # ---------------------------------
 # Health check
 # ---------------------------------
@@ -352,4 +473,3 @@ def app_categories(
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
-

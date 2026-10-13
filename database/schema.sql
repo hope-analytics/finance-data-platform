@@ -49,6 +49,8 @@ CREATE TABLE transactions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
     category_id BIGINT,
     obligation_type VARCHAR(20) NOT NULL,
+    owner_id BIGINT NOT NULL,
+    participant_ids BIGINT[] NOT NULL DEFAULT '{}', 
     
     CONSTRAINT transactions_payment_source_fk
         FOREIGN KEY (payment_source_id)
@@ -66,7 +68,13 @@ CREATE TABLE transactions (
                 'RECURRING',
                 'INSTALLMENT'
                 )
-        )
+        ),
+    
+    CONSTRAINT transactions_owner_fk
+        FOREIGN KEY (owner_id)
+        REFERENCES people (person_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
 );
 
 -- Installment plan for applicable payment source
@@ -435,7 +443,7 @@ SELECT
     t.merchant,
     t.description,
     t.amount,
-    t.category,
+    COALESCE(t.category, 'Uncategorized')::VARCHAR(100) AS category,
     t.category_id,
     tc.category_name,
     CASE
@@ -490,13 +498,21 @@ CREATE TABLE recurring_expenses (
             )
         ),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ownder_id BIGINT NOT NULL,
+    participant_ids BIGINT[] NOT NULL DEFAULT '{}',
 
     CONSTRAINT recurring_contract_dates_check
         CHECK(contract_end_date >= contract_start_date),
 
     CONSTRAINT recurring_payment_source_fk
         FOREIGN KEY(payment_source_id)
-        REFERENCES payment_sources(payment_source_id)
+        REFERENCES payment_sources(payment_source_id),
+
+    CONSTRAINT recurring_expenses_owner_fk
+        FOREIGN KEY (owner_id)
+        REFERENCES people (person_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
 );
 
 CREATE TABLE recurring_schedule (
@@ -633,22 +649,28 @@ DECLARE
     v_amount NUMERIC(12,2);
     v_category VARCHAR(100);
     v_payment_source_id BIGINT;
+    v_owner_id BIGINT;
+    v_participant_ids BIGINT[];
     v_generated_count INTEGER := 0;
-    r_schedule RECORD;
+    v_schedule RECORD;
 BEGIN
-
+    -- Lock the recurring definition while generating transactions.
     SELECT
         merchant,
         description,
         amount,
         category,
-        payment_source_id
+        payment_source_id,
+        owner_id,
+        participant_ids
     INTO
         v_merchant,
         v_description,
         v_amount,
         v_category,
-        v_payment_source_id
+        v_payment_source_id,
+        v_owner_id,
+        v_participant_ids
     FROM recurring_expenses
     WHERE recurring_id = p_recurring_id
     FOR UPDATE;
@@ -659,13 +681,13 @@ BEGIN
             p_recurring_id;
     END IF;
 
-    IF v_amount IS NULL OR v_amount <= 0 THEN
+    IF v_amount <= 0 THEN
         RAISE EXCEPTION
-            'Recurring expense % has an invalid amount: %',
-            p_recurring_id,
-            v_amount;
+            'Recurring expense % has invalid amount',
+            p_recurring_id;
     END IF;
 
+    -- Schedule must already exist.
     IF NOT EXISTS (
         SELECT 1
         FROM recurring_schedule
@@ -676,10 +698,10 @@ BEGIN
             p_recurring_id;
     END IF;
 
-    FOR r_schedule IN
+    -- Materialize one transaction for each scheduled occurrence.
+    FOR v_schedule IN
         SELECT
             schedule_id,
-            occurrence_number,
             payment_date
         FROM recurring_schedule
         WHERE recurring_id = p_recurring_id
@@ -694,24 +716,26 @@ BEGIN
             amount,
             category,
             payment_source_id,
+            owner_id,
+            participant_ids,
             obligation_type
         )
         VALUES (
-            r_schedule.payment_date,
+            v_schedule.payment_date,
             v_merchant,
             v_description,
             v_amount,
             v_category,
             v_payment_source_id,
+            v_owner_id,
+            v_participant_ids,
             'RECURRING'
         );
 
         v_generated_count := v_generated_count + 1;
-
     END LOOP;
 
     RETURN v_generated_count;
-
 END;
 $$;
 
@@ -735,3 +759,151 @@ AFTER INSERT
 ON recurring_expenses
 FOR EACH ROW
 EXECUTE FUNCTION trg_materialize_recurring_expense();
+
+CREATE OR REPLACE VIEW vw_recurring_expenses AS
+SELECT
+    re.recurring_id,
+    re.merchant,
+    re.description,
+    re.amount,
+    re.category,
+    re.payment_source_id,
+    re.contract_start_date,
+    re.contract_end_date,
+    CASE
+        WHEN CURRENT_DATE >= re.contract_end_date 
+            THEN 'COMPLETED'
+        WHEN CURRENT_DATE > re.contract_end_date AND CURRENT_DATE >= DATE_TRUNC('month', re.contract_end_date) - INTERVAL '1 month'
+            THEN 'CONTRACT REVIEW'
+        ELSE 'ACTIVE'
+    END AS status,
+    re.created_at
+FROM recurring_expenses AS re;
+
+CREATE TABLE people (
+    person_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(255),
+    phone VARCHAR (20),
+    create_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION set_transaction_participants(
+    p_expense_id BIGINT,
+    p_participant_ids BIGINT[]
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_participant_id BIGINT;
+BEGIN
+    -- Lock the transaction so the participant update is atomic.
+    PERFORM 1
+    FROM transactions
+    WHERE expense_id = p_expense_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Transaction % does not exist', p_expense_id;
+    END IF;
+
+    -- Treat NULL as an empty participant set.
+    p_participant_ids := COALESCE(p_participant_ids, '{}'::BIGINT[]);
+
+    -- Reject duplicate participant IDs.
+    IF EXISTS (
+        SELECT 1
+        FROM unnest(p_participant_ids) AS p
+        GROUP BY p
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'Duplicate participant IDs are not allowed';
+    END IF;
+
+    -- Every participant must exist in people.
+    FOREACH v_participant_id IN ARRAY p_participant_ids
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1
+            FROM people
+            WHERE person_id = v_participant_id
+        ) THEN
+            RAISE EXCEPTION
+                'Participant person_id % does not exist',
+                v_participant_id;
+        END IF;
+    END LOOP;
+
+    -- Replace the participant membership atomically.
+    UPDATE transactions
+    SET participant_ids = p_participant_ids
+    WHERE expense_id = p_expense_id;
+END;
+$$;
+
+CREATE OR REPLACE VIEW vw_payment_obligation_participants AS
+WITH obligation_participants AS (
+    SELECT
+        po.expense_id,
+        po.payment_due,
+        po.obligation_type,
+        po.plan_id,
+        po.installment_number,
+        po.payment_amount,
+        t.transaction_date,
+        t.merchant,
+        t.category,
+        t.payment_source_id,
+        t.owner_id,
+        p.person_id AS participant_id,
+        p.name AS participant_name,
+        COUNT(*) OVER (
+            PARTITION BY po.expense_id, po.payment_due
+        ) AS participant_count,
+        ROW_NUMBER() OVER (
+            PARTITION BY po.expense_id, po.payment_due
+            ORDER BY p.person_id
+        ) AS participant_position
+    FROM payment_obligations AS po
+    JOIN transactions AS t
+        ON t.expense_id = po.expense_id
+    CROSS JOIN LATERAL unnest(
+        CASE
+            WHEN cardinality(t.participant_ids) > 0
+                THEN t.participant_ids
+            ELSE ARRAY[t.owner_id]::BIGINT[]
+        END
+    ) AS participant(person_id)
+    JOIN people AS p
+        ON p.person_id = participant.person_id
+)
+SELECT
+    expense_id,
+    payment_due,
+    obligation_type,
+    plan_id,
+    installment_number,
+    payment_amount,
+    transaction_date,
+    merchant,
+    category,
+    payment_source_id,
+    owner_id,
+    participant_id,
+    participant_name,
+    participant_count,
+    CASE
+        WHEN participant_position < participant_count
+            THEN ROUND(
+                payment_amount / participant_count,
+                2
+            )
+        ELSE
+            payment_amount
+            - ROUND(
+                payment_amount / participant_count,
+                2
+            ) * (participant_count - 1)
+    END AS allocation_amount
+FROM obligation_participants;
