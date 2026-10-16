@@ -907,3 +907,289 @@ SELECT
             ) * (participant_count - 1)
     END AS allocation_amount
 FROM obligation_participants;
+
+CREATE TABLE cash_settlements (
+    expense_id BIGINT NOT NULL,
+    owner_id BIGINT NOT NULL,
+    participant_id BIGINT NOT NULL,
+
+    due_date DATE NOT NULL,
+    amount_due NUMERIC(12,2) NOT NULL,
+
+    CONSTRAINT cash_settlements_pkey
+        PRIMARY KEY (expense_id, participant_id),
+
+    CONSTRAINT cash_settlements_expense_fk
+        FOREIGN KEY (expense_id)
+        REFERENCES transactions (expense_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT cash_settlements_owner_fk
+        FOREIGN KEY (owner_id)
+        REFERENCES payment_sourcespeople (person_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT cash_settlements_participant_fk
+        FOREIGN KEY (participant_id)
+        REFERENCES people (person_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT cash_settlements_amount_positive
+        CHECK (amount_due > 0),
+
+    CONSTRAINT cash_settlements_not_self
+        CHECK (owner_id <> participant_id)
+);
+
+CREATE INDEX idx_cash_settlements_owner_due_date
+    ON payment_sourcescash_settlements (owner_id, due_date);
+
+CREATE INDEX idx_cash_settlements_participant_due_date
+    ON payment_sourcescash_settlements (participant_id, due_date);
+
+CREATE OR REPLACE FUNCTION generate_cash_settlements()
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    inserted_count INTEGER;
+BEGIN
+    -- Reject duplicate participant IDs for eligible transactions.
+    IF EXISTS (
+        SELECT 1
+        FROM transactions AS t
+        JOIN payment_sources AS ps
+            ON ps.payment_source_id = t.payment_source_id
+        CROSS JOIN LATERAL unnest(
+            CASE
+                WHEN cardinality(t.participant_ids) > 0
+                    THEN t.participant_ids
+                ELSE ARRAY[t.owner_id]
+            END
+        ) AS p(participant_id)
+        WHERE ps.payment_type IN ('CASH', 'E_WALLET')
+          AND t.obligation_type = 'NORMAL'
+        GROUP BY t.expense_id, p.participant_id
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE EXCEPTION
+            'Duplicate participant IDs found in eligible transactions';
+    END IF;
+
+    -- Reject participant IDs that do not exist in people.
+    IF EXISTS (
+        SELECT 1
+        FROM transactions AS t
+        JOIN payment_sources AS ps
+            ON ps.payment_source_id = t.payment_source_id
+        CROSS JOIN LATERAL unnest(
+            CASE
+                WHEN cardinality(t.participant_ids) > 0
+                    THEN t.participant_ids
+                ELSE ARRAY[t.owner_id]
+            END
+        ) AS p(participant_id)
+        LEFT JOIN people AS person
+            ON person_id = p.participant_id
+        WHERE ps.payment_type IN ('CASH', 'E_WALLET')
+          AND t.obligation_type = 'NORMAL'
+          AND person.person_id IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'Unknown participant IDs found in eligible transactions';
+    END IF;
+
+    WITH eligible_transactions AS (
+        SELECT
+            t.expense_id,
+            t.owner_id,
+            t.transaction_date,
+            t.amount,
+            t.participant_ids
+        FROM transactions AS t
+        JOIN payment_sources AS ps
+            ON ps.payment_source_id = t.payment_source_id
+        WHERE ps.payment_type IN ('CASH', 'E_WALLET')
+          AND t.obligation_type = 'NORMAL'
+    ),
+    expanded_participants AS (
+        SELECT
+            t.expense_id,
+            t.owner_id,
+            t.transaction_date,
+            t.amount,
+            p.participant_id,
+            COUNT(*) OVER (
+                PARTITION BY t.expense_id
+            ) AS participant_count,
+            ROW_NUMBER() OVER (
+                PARTITION BY t.expense_id
+                ORDER BY p.participant_id
+            ) AS participant_number
+        FROM eligible_transactions AS t
+        CROSS JOIN LATERAL unnest(
+            CASE
+                WHEN cardinality(t.participant_ids) > 0
+                    THEN t.participant_ids
+                ELSE ARRAY[t.owner_id]
+            END
+        ) AS p(participant_id)
+    ),
+    allocations AS (
+        SELECT
+            expense_id,
+            owner_id,
+            participant_id,
+            transaction_date,
+            CASE
+                WHEN participant_number = participant_count
+                    THEN amount
+                         - ROUND(amount / participant_count, 2)
+                           * (participant_count - 1)
+                ELSE ROUND(amount / participant_count, 2)
+            END AS allocation_amount
+        FROM expanded_participants
+    )
+    INSERT INTO payment_sourcescash_settlements (
+        expense_id,
+        owner_id,
+        participant_id,
+        due_date,
+        amount_due
+    )
+    SELECT
+        expense_id,
+        owner_id,
+        participant_id,
+        (
+            transaction_date
+            + (
+                (
+                    5 - EXTRACT(ISODOW FROM transaction_date)::INTEGER + 7
+                ) % 7
+            )
+        )::DATE,
+        allocation_amount::NUMERIC(12,2)
+    FROM allocations
+    WHERE participant_id <> owner_id
+      AND allocation_amount > 0
+    ON CONFLICT (expense_id, participant_id) DO NOTHING;
+
+    GET DIAGNOSTICS inserted_count = ROW_COUNT;
+
+    RETURN inserted_count;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS payment_sourcescash_statements (
+    owner_id BIGINT NOT NULL,
+    participant_id BIGINT NOT NULL,
+    due_date DATE NOT NULL,
+
+    status VARCHAR(10) NOT NULL DEFAULT 'PENDING',
+    paid_at TIMESTAMP WITHOUT TIME ZONE,
+
+    created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    description VARCHAR(255),
+
+    amount_due NUMERIC(12,2) NOT NULL,
+
+    CONSTRAINT pk_cash_statements
+        PRIMARY KEY (owner_id, participant_id, due_date),
+
+    CONSTRAINT fk_cash_statements_owner
+        FOREIGN KEY (owner_id)
+        REFERENCES payment_sourcespeople(person_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_cash_statements_participant
+        FOREIGN KEY (participant_id)
+        REFERENCES payment_sourcespeople(person_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT chk_cash_statements_different_people
+        CHECK (owner_id <> participant_id),
+
+    CONSTRAINT chk_cash_statements_status
+        CHECK (status IN ('PENDING', 'PAID')),
+
+    CONSTRAINT chk_cash_statements_paid_at
+        CHECK (
+            (status = 'PENDING' AND paid_at IS NULL)
+            OR
+            (status = 'PAID' AND paid_at IS NOT NULL)
+        )
+);
+
+CREATE OR REPLACE FUNCTION payment_sourcescreate_cash_statement_for_settlement()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO payment_sourcescash_statements (
+        owner_id,
+        participant_id,
+        due_date,
+        description,
+        amount_due
+    )
+    SELECT
+        NEW.owner_id,
+        NEW.participant_id,
+        NEW.due_date,
+        'Payment to ' || p.name,
+        NEW.amount_due
+    FROM payment_sourcespeople AS p
+    WHERE p.person_id = NEW.owner_id
+    ON CONFLICT (owner_id, participant_id, due_date)
+    DO UPDATE SET
+        amount_due =
+            payment_sourcescash_statements.amount_due + EXCLUDED.amount_due,
+        updated_at = CURRENT_TIMESTAMP;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_create_cash_statement
+AFTER INSERT ON payment_sourcescash_settlements
+FOR EACH ROW
+EXECUTE FUNCTION payment_sourcescreate_cash_statement_for_settlement();
+
+-- Backfill any statement groups that are missing.
+INSERT INTO payment_sourcescash_statements (
+    owner_id,
+    participant_id,
+    due_date,
+    description
+)
+SELECT DISTINCT
+    cs.owner_id,
+    cs.participant_id,
+    cs.due_date,
+    'Payment to ' || p.name
+FROM payment_sourcescash_settlements AS cs
+JOIN payment_sourcespeople AS p
+    ON p.person_id = cs.owner_id
+ON CONFLICT (owner_id, participant_id, due_date)
+DO NOTHING;
+
+CREATE OR REPLACE VIEW payment_sourcesvw_cash_statements AS
+SELECT
+    cs.owner_id,
+    owner.name AS owner_name,
+    cs.participant_id,
+    participant.name AS participant_name,
+    cs.description,
+    cs.amount_due,
+    cs.due_date,
+    cs.status,
+    cs.paid_at,
+    cs.created_at,
+    cs.updated_at
+FROM payment_sourcescash_statements AS cs
+JOIN payment_sourcespeople AS owner
+    ON owner.person_id = cs.owner_id
+JOIN payment_sourcespeople AS participant
+    ON participant.person_id = cs.participant_id;
