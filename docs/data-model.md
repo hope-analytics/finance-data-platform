@@ -2,53 +2,72 @@
 
 ## Overview
 
-The Finance Data Platform uses PostgreSQL to separate original transaction records, reusable payment-source reference data, credit-card-specific information, installment relationships, recurring commitments, derived schedules, and payment-level analytical semantics.
+The Finance Data Platform uses PostgreSQL to separate original transaction records, reusable payment-source reference data, credit-card-specific information, installment relationships, recurring commitments, payment obligations, participant allocation, interpersonal settlement tracking, and analytical datasets.
 
-The current data model consists of the following operational and semantic objects:
+The model distinguishes three related but different concepts:
+
+- **Spending transactions** represent the original financial event.
+- **Payment obligations** represent payment amounts and dates for the implemented single-payment credit-card, installment, and recurring contexts.
+- **Cash settlements and statements** represent interpersonal reimbursement allocations and tracking. They are not additional spending transactions or payment obligations.
+
+The current logical model is:
 
 ```text
-payment_sources
-      |
-      +--------------------+
-      |                    |
-      v                    v
-transactions         credit_cards
-      |                    |
-      |                    |
-      +----+---------------+
-           |
-      +----+------------------+
-      |                       |
-      v                       v
-installment_plans      recurring_expenses
-      |                       |
-      v                       v
-installment_schedule  recurring_schedule
-      |                       |
-      +-----------+-----------+
-                  |
-                  v
-         payment_obligations
-                  |
-                  v
-         vw_monthly_payments
+people
+  │
+  ├──────────────────────┐
+  │                      │
+  v                      v
+transactions         cash_settlements
+(owner_id,           (transaction ×
+ participant_ids)     beneficiary)
+  │                      │
+  │                      v
+  │                 cash_statements
+  │                 (owner × beneficiary
+  │                  × due date)
+  │
+  ├── payment_sources
+  │       │
+  │       └── credit_cards
+  │
+  ├── installment_plans
+  │       │
+  │       v
+  │   installment_schedule
+  │       │
+  ├───────┴───────────────┐
+  │                       │
+  v                       v
+recurring_expenses   payment_obligations
+  │                       │
+  v                       ├── vw_monthly_payments
+recurring_schedule        └── vw_payment_obligation_participants
+  │
+  v
+future-dated transactions
+
+transactions + payment_sources
+  │
+  v
+vw_transactions
 ```
+
+This is a conceptual relationship diagram, not a complete physical foreign-key diagram. It does not imply that all objects are joined into every analytical view.
 
 `transactions` stores individual financial transactions and remains the source of truth for the spending event.
 
-`payment_sources` stores reusable payment-source reference values.
+`payment_sources` stores reusable payment-source reference values. `credit_cards` stores credit-card-specific reference information.
 
-`credit_cards` stores credit-card-specific reference information.
+`installment_plans` associates an original transaction with an installment arrangement, and `installment_schedule` stores the derived installment payment allocations.
 
-`installment_plans` associates an original transaction with an installment arrangement.
+`recurring_expenses` stores bounded recurring financial commitments, while `recurring_schedule` stores scheduled occurrences generated from recurring definitions. The database-controlled process also materializes the occurrences as future-dated transaction records.
 
-`installment_schedule` stores the derived installment payment allocations.
+`payment_obligations` provides the current payment-obligation semantic representation for single-payment credit-card, installment, and recurring-generated transactions.
 
-`recurring_expenses` stores bounded recurring financial commitments.
+Transaction ownership and participant membership are represented by `owner_id` and `participant_ids`. `vw_payment_obligation_participants` provides participant-level analytical allocation for payment obligations.
 
-`recurring_schedule` stores scheduled occurrences generated from recurring definitions.
-
-`payment_obligations` provides the current payment-obligation semantic representation for single-payment, installment, and recurring-generated transactions.
+`cash_settlements` and `cash_statements` represent interpersonal reimbursement allocations and beneficiary statements for eligible cash and e-wallet transactions. This settlement model is separate from `payment_obligations`.
 
 PostgreSQL also provides analytical views used by Apache Superset for transaction-level and payment-level reporting.
 
@@ -98,9 +117,72 @@ transactions
       | 0..1
       v
 installment_plans
+      |
+      | 1
+      |
+      | N
+      v
+installment_schedule
 ```
 
-The original transaction remains unchanged as the spending record.
+The original transaction remains unchanged as the spending record. Installment schedule rows represent derived payment obligations, not additional purchases.
+
+### People → Transaction Ownership and Participants
+
+The transaction model records ownership and participant membership:
+
+- `owner_id` identifies the transaction owner/payer.
+- `participant_ids` stores the explicit participant membership associated with the transaction.
+- `people` is the reference entity for people associated with ownership, participant membership, and interpersonal settlement records.
+
+The current model uses `participant_ids` on `transactions`; it does not use a separate `transaction_participants` table as the source of participant membership.
+
+Participant semantics:
+
+- An empty participant array means the owner is the implicit participant and does not create a reimbursement allocation.
+- If the owner is included in a non-empty participant list, the owner's own share is excluded from reimbursement allocation.
+- If the owner is absent from a non-empty participant list, the owner is not automatically inserted into that list.
+- A transaction with multiple non-owner beneficiaries can produce separate allocation rows for those beneficiaries.
+
+The exact physical enforcement of the `people` relationship should be confirmed against the current database implementation rather than inferred from this logical relationship.
+
+### Transactions → Cash Settlements
+
+Eligible transactions can produce one or more reimbursement allocations in `cash_settlements`.
+
+```text
+transactions
+(owner_id, participant_ids)
+      |
+      | eligible CASH / E_WALLET
+      | and obligation_type = NORMAL
+      v
+cash_settlements
+(transaction × beneficiary)
+      |
+      v
+cash_statements
+(owner × beneficiary × due date)
+```
+
+`cash_settlements` records allocations at transaction × beneficiary grain. `cash_statements` groups settlement amounts by owner, beneficiary, and due date.
+
+These objects are not additional spending transactions and are not part of `payment_obligations`.
+
+### Payment Obligations → Participant Analytical View
+
+`vw_payment_obligation_participants` exposes participant allocation at payment-obligation × participant grain.
+
+```text
+payment_obligations
+        +
+participant allocation data
+        |
+        v
+vw_payment_obligation_participants
+```
+
+This is an analytical relationship, not a separate spending table. When joining this view to transaction-level data, account for row multiplication where a payment obligation has multiple participants.
 
 ## Recurring Expenses
 
@@ -137,7 +219,7 @@ Creating a recurring expense immediately generates its bounded schedule and mate
 
 `recurring_expenses` represents the recurring financial commitment.
 
-The implemented physical model includes:
+The documented physical model includes:
 
 | Column | Type | Description |
 |---|---|---|
@@ -168,8 +250,6 @@ Automatic renewal is not part of the current implementation.
 
 `recurring_schedule` represents the scheduled occurrences associated with a recurring expense.
 
-The implemented physical model includes:
-
 | Column | Type | Description |
 |---|---|---|
 | `schedule_id` | BIGINT | Unique identifier for the schedule row |
@@ -192,7 +272,7 @@ The current implementation does **not** include:
 - a transaction foreign key; or
 - a persistent schedule-to-generated-transaction relationship.
 
-The schedule therefore represents the generated recurring occurrences, while the generated transaction records exist separately in the canonical `transactions` table.
+The schedule represents generated recurring occurrences, while the generated transaction records exist separately in the canonical `transactions` table.
 
 ### Recurring Schedule to Transaction
 
@@ -216,7 +296,7 @@ The transaction does not require a `recurring_id`.
 
 The schedule retains lineage to the recurring definition through `recurring_id`, but there is no persistent foreign-key relationship from `recurring_schedule` to the generated transaction.
 
-The current implementation therefore does not support recurring correction or deletion through schedule-to-transaction lineage.
+The current implementation therefore does not support recurring correction or deletion through persistent schedule-to-transaction lineage.
 
 ## Installment Plans → Installment Schedule
 
@@ -246,14 +326,19 @@ The `transactions` table stores individual financial transactions.
 |---|---|---|
 | `expense_id` | BIGINT | Unique identifier for the transaction |
 | `transaction_date` | DATE | Date the transaction occurred |
-| `merchant` | VARCHAR(255) | Merchant or transaction source |
+| `merchant` | VARCHAR | Merchant or transaction source |
 | `description` | TEXT | Transaction description |
 | `amount` | NUMERIC(12,2) | Transaction amount |
-| `category` | VARCHAR(100) | Transaction category |
+| `category` | VARCHAR | Transaction category |
+| `category_id` | BIGINT | Optional category reference identifier where supported by the current schema |
 | `payment_source_id` | BIGINT | References the payment source used |
 | `notes` | TEXT | Optional transaction notes |
 | `created_at` | TIMESTAMP | Record creation timestamp |
 | `obligation_type` | VARCHAR | System-derived transaction obligation classification |
+| `owner_id` | BIGINT | Transaction owner/payer |
+| `participant_ids` | BIGINT[] | Explicit participant membership for the transaction |
+
+**Schema verification:** The checked-in schema documentation has previously lagged the implemented database. Confirm the exact column types, nullability, and constraints against the current database implementation before treating this table as a physical DDL specification. The `category_id` row is included to document the current category-reference model; verify its exact physical definition in the live schema.
 
 The `transactions` table remains the canonical source of truth for financial transaction records.
 
@@ -275,11 +360,20 @@ The implemented transaction classification model uses `obligation_type` to descr
 
 `obligation_type` is system-derived and is not a user-controlled frontend field.
 
-`obligation_type` does not replace `payment_source_id`.
-
-For example, a recurring expense paid using a credit card remains associated with its credit-card payment source while being classified as `RECURRING`.
+`obligation_type` does not replace `payment_source_id`. For example, a recurring expense paid using a credit card remains associated with its credit-card payment source while being classified as `RECURRING`.
 
 The physical database implementation constrains `obligation_type` to the supported values above and requires a non-null value.
+
+### people
+
+`people` is the reference entity for people who can be associated with transaction ownership, participant membership, and interpersonal settlement records.
+
+The current transaction model uses:
+
+- `transactions.owner_id` to identify the transaction owner/payer;
+- `transactions.participant_ids` to store explicit participant membership.
+
+This document does not specify the full physical column list for `people`, because those exact columns and constraints should be taken from the current database definition.
 
 ### payment_sources
 
@@ -288,13 +382,15 @@ The `payment_sources` table stores reusable payment-source reference values.
 | Column | Type | Description |
 |---|---|---|
 | `payment_source_id` | BIGINT | Unique identifier for the payment source |
-| `payment_name` | VARCHAR(100) | Name of the payment source |
-| `payment_type` | VARCHAR(50) | Type of payment source |
+| `payment_name` | VARCHAR | Name of the payment source |
+| `payment_type` | VARCHAR | Type of payment source |
 | `active` | BOOLEAN | Indicates whether the payment source is active |
 
 Transactions reference payment sources through `payment_source_id`.
 
 Only active payment sources can be assigned to new transactions.
+
+For Cash Payment and Interpersonal Settlement V1, eligible payment-source types are `CASH` and `E_WALLET`, and the transaction must have `obligation_type = NORMAL`.
 
 ### credit_cards
 
@@ -304,7 +400,7 @@ The `credit_cards` table stores credit-card-specific reference information.
 |---|---|---|
 | `credit_card_id` | BIGINT | Unique identifier for the credit card |
 | `payment_source_id` | BIGINT | References the associated payment source |
-| `card_name` | VARCHAR(100) | Name or identifier for the credit card |
+| `card_name` | VARCHAR | Name or identifier for the credit card |
 | `statement_day` | SMALLINT | Day used as the statement cutoff |
 | `payment_day` | SMALLINT | Configured payment day |
 
@@ -352,6 +448,53 @@ Constraints include:
 - Each installment number is unique within an installment plan.
 
 The installment schedule represents derived payment obligations and does not represent separate spending events.
+
+### cash_settlements
+
+`cash_settlements` stores transaction-level reimbursement allocations between the transaction owner and eligible non-owner beneficiaries.
+
+The documented logical grain is **one transaction × one beneficiary allocation**. A transaction with multiple eligible non-owner beneficiaries can produce separate settlement rows.
+
+The settlement flow is eligible only when both conditions are true:
+
+- `payment_sources.payment_type` is `CASH` or `E_WALLET`;
+- `transactions.obligation_type` is `NORMAL`.
+
+GCash is represented by an e-wallet payment source.
+
+The logical settlement record contains the transaction, owner, beneficiary, due date, and allocated amount. The implemented model uses `NUMERIC(12,2)` for monetary allocation. Confirm exact physical column names, constraints, and timestamp fields against the current database definition before using this section as a DDL reference.
+
+Allocation behavior:
+
+- Eligible participant shares are allocated equally.
+- Monetary values use two-decimal precision.
+- A deterministic rounding residual is assigned to the final participant so that allocations reconcile to the relevant transaction amount.
+- The owner's own share is not reimbursed.
+- An empty participant array means the owner is implicit and creates no reimbursement allocation.
+- The owner is not automatically inserted into a non-empty participant list.
+
+The due date is the **first Friday on or after the transaction date**:
+
+- Monday through Friday: that week's Friday.
+- Saturday or Sunday: the following Friday.
+
+Cash settlement records are reimbursement allocations, not additional spending transactions and not `payment_obligations`.
+
+### cash_statements
+
+`cash_statements` groups cash settlement allocations into statements at **owner × beneficiary × due date** grain.
+
+The statement identifies the beneficiary and tracks settlement status.
+
+V1 statement behavior:
+
+- `PENDING` — the statement has not been marked paid.
+- `PAID` — the statement has been marked paid.
+- Partial payments are not supported.
+
+The statement groups the relevant settlement amounts for the owner, beneficiary, and due date. Confirm the exact physical column list and constraints against the current database definition before treating this description as a DDL specification.
+
+Automatic synchronization or reconciliation of existing cash settlement and statement records after upstream transaction or participant updates is deferred. Do not assume that changing an upstream transaction automatically refreshes these records.
 
 ## Payment-Due Logic
 
@@ -433,7 +576,9 @@ The current implementation supports:
 - `INSTALLMENT`
 - `RECURRING`
 
-It does not currently provide payment obligations for non-credit-card payment sources such as cash, e-wallet, bank account, debit card, or other non-credit-card types.
+It does not currently provide payment obligations for non-credit-card payment sources such as cash or e-wallet.
+
+Interpersonal reimbursement records are represented separately through `cash_settlements` and `cash_statements`; they are not part of `payment_obligations`.
 
 Therefore, `payment_obligations` should not be interpreted as a universal payment-obligation model across all payment types.
 
@@ -450,6 +595,20 @@ PostgreSQL provides analytical views for reporting and visualization.
 - **Purpose:** Provides transaction records with the associated payment source name and transaction obligation classification for analytical use
 - **Output:** Transaction fields from `transactions` plus `payment_name` from `payment_sources` and `obligation_type`
 - **Usage:** Current transaction-level analytical dataset for Apache Superset
+
+### `vw_payment_obligation_participants`
+
+`vw_payment_obligation_participants` provides participant-level allocation analysis for payment obligations.
+
+- **Grain:** One payment obligation × one participant allocation
+- **Purpose:** Makes participant-level allocation information available for analytical use
+- **Usage:** Participant-level analysis associated with payment obligations
+
+This view is not transaction-grain data. Joining it to transaction-level data can multiply rows when a payment obligation has multiple participants. Aggregations should respect the view's grain.
+
+The participant-level view does not create additional spending transactions. It should not be confused with `cash_settlements`, which records interpersonal reimbursement allocations for eligible cash and e-wallet transactions.
+
+Confirm the exact output columns and SQL transformation against the current view definition before relying on a column-by-column contract.
 
 ### `vw_monthly_payments`
 
@@ -479,7 +638,7 @@ The analytical views provide reporting-oriented representations without replacin
 
 ## Referential Integrity
 
-The database enforces referential integrity through foreign-key relationships.
+The documented database relationships include:
 
 - `transactions.payment_source_id` references `payment_sources.payment_source_id`.
 - `credit_cards.payment_source_id` references `payment_sources.payment_source_id`.
@@ -488,6 +647,8 @@ The database enforces referential integrity through foreign-key relationships.
 - `recurring_schedule.recurring_id` references `recurring_expenses.recurring_id`.
 
 The current recurring model intentionally does **not** include a foreign-key relationship from `recurring_schedule` to `transactions`.
+
+The `owner_id` and `participant_ids` fields represent ownership and participant membership. Verify the current physical enforcement and reference constraints for `people` against the database definition before treating them as confirmed foreign keys.
 
 Unique constraints also prevent multiple installment plans from being associated with the same transaction, prevent duplicate installment numbers within the same plan, and prevent duplicate recurring occurrence numbers within the same recurring commitment.
 
@@ -507,6 +668,8 @@ The `transactions` table remains the operational source of the spending event.
 
 Installment schedules, recurring-generated transaction records, and payment obligations are derived representations of financial processing and must not be interpreted as additional purchases beyond the transaction records they represent.
 
+Cash settlement allocations represent reimbursement between people and are not additional spending transactions.
+
 ### Separate Installment Relationships from Spending Records
 
 Installment information is represented through `installment_plans` and `installment_schedule` rather than adding installment-specific identity fields to the original transaction.
@@ -525,6 +688,22 @@ The recurring schedule maintains lineage to the recurring definition through `re
 
 The current `payment_obligations` layer provides a common payment-level representation for the implemented single-payment, installment, and recurring contexts.
 
+Cash and e-wallet reimbursement tracking is a separate domain and is not included in `payment_obligations`.
+
+### Ownership and Participant Membership
+
+Transaction ownership and explicit participant membership are stored with the transaction through `owner_id` and `participant_ids`.
+
+An empty participant array means the owner is implicit and does not create reimbursement. The owner is not automatically inserted into a non-empty participant list. When the owner is included in the explicit list, their own share is excluded from reimbursement allocation.
+
+### Cash Settlement and Statement Separation
+
+`cash_settlements` records reimbursement allocations at transaction × beneficiary grain. `cash_statements` groups allocations by owner, beneficiary, and due date.
+
+The due date is the first Friday on or after the transaction date. Statements use `PENDING` and `PAID` status, and partial payments are not supported in V1.
+
+Automatic synchronization of settlement and statement records after upstream transaction or participant updates is deferred.
+
 ### Analytical Views for Reporting
 
 Analytical views are used to provide stable, purpose-specific datasets for reporting and visualization while keeping analytical transformations separate from the operational transaction tables.
@@ -538,12 +717,19 @@ The current data model supports:
 - Credit-card reference data
 - Transaction-to-payment-source relationships
 - Credit-card-to-payment-source relationships
+- Transaction ownership through `owner_id`
+- Explicit participant membership through `participant_ids`
+- People reference data
 - Credit-card installment plans
 - Derived installment schedules
 - Bounded recurring financial commitments
 - Recurring schedules and future-dated recurring transactions
 - System-derived transaction obligation classification
 - Payment-obligation semantics for single-payment, installment, and recurring transactions
+- Participant-level payment-obligation allocation analysis through `vw_payment_obligation_participants`
+- Cash/e-wallet reimbursement allocations for eligible `NORMAL` transactions
+- Beneficiary statements grouped by owner, beneficiary, and due date
+- Friday-based due dates and `PENDING`/`PAID` statement status for Cash Payment & Interpersonal Settlement V1
 - Transaction-level analytical reporting through `vw_transactions`
 - Payment-level reporting through `vw_monthly_payments`
 - Apache Superset as the current reporting and visualization platform
@@ -557,3 +743,5 @@ The current V1 implementation does not implement:
 - Cash-flow forecasting
 - Universal payment obligations across all payment types
 - Persistent schedule-to-generated-transaction lineage for recurring correction or deletion
+- Partial settlement payments
+- Automatic synchronization or reconciliation of cash settlement records after upstream transaction or participant changes

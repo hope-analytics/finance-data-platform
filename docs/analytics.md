@@ -2,15 +2,18 @@
 
 ## Overview
 
-The analytics layer provides PostgreSQL datasets specifically intended for analytical and visualization workloads.
+The analytics layer provides PostgreSQL datasets intended for analytical and visualization workloads.
 
-The platform separates the operational database tables from the datasets consumed by Apache Superset:
+The platform separates operational financial data, payment-obligation semantics, interpersonal settlement tracking, and analytical datasets consumed by Apache Superset.
 
 ```text
 PostgreSQL
 │
-├── Operational Tables
+├── Reference and Operational Tables
+│   ├── people
 │   ├── transactions
+│   │   ├── owner_id
+│   │   └── participant_ids
 │   ├── payment_sources
 │   ├── credit_cards
 │   ├── installment_plans
@@ -21,8 +24,13 @@ PostgreSQL
 ├── Payment Semantic Layer
 │   └── payment_obligations
 │
+├── Interpersonal Settlement Layer
+│   ├── cash_settlements
+│   └── cash_statements
+│
 └── Analytical Views
     ├── vw_transactions
+    ├── vw_payment_obligation_participants
     └── vw_monthly_payments
               │
               ▼
@@ -30,26 +38,31 @@ PostgreSQL
        (Reporting & Visualization)
 ```
 
-The operational tables remain the underlying source of financial transaction data.
+The operational tables remain the source of the platform's financial transaction data.
 
-The payment semantic layer provides the current payment-obligation representation used by payment-oriented analytical logic. It supports single-payment, installment, and recurring obligations.
+The `payment_obligations` semantic layer represents the current payment obligations used by payment-oriented analytics. It supports single-payment credit-card, installment, and recurring obligations.
 
-Analytical views provide purpose-specific datasets for reporting and visualization without requiring Superset charts to query the raw transactional structures directly.
+The interpersonal settlement layer tracks reimbursement allocations and beneficiary statements separately from payment obligations and original spending transactions.
 
-Apache Superset is the current reporting and visualization platform for the project.
+Analytical views provide purpose-specific datasets for reporting and visualization without requiring Superset charts to query raw transactional structures directly.
+
+Apache Superset is the current reporting and visualization platform for the project. The architecture diagram does not imply that cash settlement tables are currently configured as Superset datasets.
 
 ---
 
 ## Analytical Views
 
-The current analytics layer contains two PostgreSQL views:
+The current analytics layer includes the following PostgreSQL views:
 
 | View | Grain | Primary Purpose |
 |---|---|---|
 | `vw_transactions` | One row per transaction | Transaction-level reporting and visualization |
+| `vw_payment_obligation_participants` | Payment obligation × participant | Participant-level allocation analysis for payment obligations |
 | `vw_monthly_payments` | One row per payment due date/payment-day grouping | Monthly payment analysis |
 
-These views provide stable analytical interfaces for Apache Superset.
+These views provide analytical interfaces for downstream reporting. Each view must be used at its intended grain.
+
+`vw_payment_obligation_participants` is a participant-level view, not a transaction-level view. Joining it to transaction-grain data can multiply rows when an obligation has multiple participants. Aggregations must account for this grain difference.
 
 ---
 
@@ -59,9 +72,9 @@ These views provide stable analytical interfaces for Apache Superset.
 
 `vw_transactions` provides a transaction-level analytical dataset for visualization and reporting.
 
-It is based on the `transactions` table and enriches each transaction with the human-readable payment source name from `payment_sources`.
+It is based on `transactions` and enriches each transaction with the human-readable payment source name from `payment_sources`.
 
-The view allows Superset to work with transaction data while exposing `payment_name` directly, rather than requiring each visualization to resolve the payment-source relationship independently.
+The view allows Superset to use transaction data while exposing `payment_name` directly, rather than requiring each visualization to resolve the payment-source relationship independently.
 
 ### Grain
 
@@ -82,16 +95,11 @@ payment_sources
 vw_transactions
 ```
 
-The view joins:
-
-- `transactions`
-- `payment_sources`
-
-using `payment_source_id`.
+The view joins `transactions` and `payment_sources` using `payment_source_id`.
 
 ### Output
 
-The view exposes analytical fields derived from the transaction and payment-source data, including:
+The view exposes analytical fields derived from transaction and payment-source data, including:
 
 | Column | Source | Description |
 |---|---|---|
@@ -112,6 +120,8 @@ The view exposes analytical fields derived from the transaction and payment-sour
 - `SINGLE_PAYMENT`
 - `RECURRING`
 - `INSTALLMENT`
+
+The transaction model also carries `owner_id` and `participant_ids` for ownership and participant membership. Confirm the exact output columns of the current view definition before assuming these fields are exposed by `vw_transactions`.
 
 ### Transformation Logic
 
@@ -135,11 +145,44 @@ The view does not replace or modify the underlying `transactions` table.
 - **Table — Daily Expenses**
 - **Line Chart — Daily Expenses**
 
+---
+
+## `vw_payment_obligation_participants`
+
+### Purpose
+
+`vw_payment_obligation_participants` provides a participant-level analytical representation of payment obligations. It supports analysis of how payment obligations are allocated across transaction participants.
+
+The view enriches payment-obligation analysis with participant membership and allocation information. It does not create new spending transactions and does not replace the original transaction or the `payment_obligations` semantic layer.
+
+### Grain
+
+**One row represents a payment obligation × participant allocation.**
+
+A payment obligation associated with multiple participants can therefore produce multiple rows in this view. Aggregations that require payment-obligation or transaction grain must account for this row multiplication.
+
+### Ownership and Participant Semantics
+
+Transactions identify their owner through `owner_id` and explicit participant membership through `participant_ids`.
+
+- An empty participant array means the owner is the implicit participant; it does not create a reimbursement allocation.
+- When the owner is included in a non-empty participant list, the owner's own share is excluded from reimbursement allocation.
+- When the owner is absent from a non-empty participant list, the owner is not automatically inserted into that list.
+- Participant-level allocation rows are an analytical breakdown and must not be counted as additional spending transactions.
+
+### Analytical Usage
+
+Use this view when reporting on participant-level allocations associated with payment obligations. Use `vw_transactions` for transaction-level reporting and `vw_monthly_payments` for aggregated payment timing and amounts.
+
+Do not sum participant-level rows as though each row were a distinct original transaction or payment obligation unless the calculation explicitly accounts for allocation grain.
+
+---
+
 ## Recurring Expenses and Analytics
 
 Recurring expenses are represented in the analytical layer through the same transaction and payment-obligation structures used by the rest of the platform.
 
-When a recurring expense is created, the database immediately materializes its scheduled occurrences as future-dated transaction records:
+When a recurring expense is created, the database-controlled process materializes its scheduled occurrences as future-dated transaction records:
 
 ```text
 recurring_expenses
@@ -198,6 +241,46 @@ The current `payment_obligations` layer supports:
 
 It should therefore be interpreted as a payment-obligation semantic layer rather than as a credit-card-only layer.
 
+Cash and e-wallet interpersonal reimbursement records are maintained separately and are not included in this semantic layer.
+
+---
+
+## Cash Payment and Interpersonal Settlement
+
+### Purpose
+
+Cash Payment and Interpersonal Settlement V1 records reimbursement allocations when an eligible cash-based transaction is paid by one person for other participants. It also groups those allocations into beneficiary statements for settlement tracking.
+
+This is a separate operational settlement flow. `cash_settlements` and `cash_statements` are not part of `payment_obligations`, and they do not represent additional spending transactions.
+
+### Eligibility
+
+The V1 settlement flow applies only when both conditions are met:
+
+- `payment_sources.payment_type` is `CASH` or `E_WALLET`.
+- `transactions.obligation_type` is `NORMAL`.
+
+GCash is represented by an e-wallet payment source.
+
+### Settlement and Statement Semantics
+
+- `cash_settlements` stores transaction-level reimbursement allocations between the transaction owner and each eligible non-owner beneficiary.
+- The due date is the first Friday on or after the transaction date. Transactions dated Monday through Friday use that week's Friday; Saturday and Sunday transactions use the following Friday.
+- `cash_statements` groups settlement amounts by owner, beneficiary, and due date.
+- Statement status is tracked as `PENDING` or `PAID`.
+- Partial payments are not supported in V1.
+- Settlement records are separate from the original transaction and from the `payment_obligations` layer.
+
+Allocations use equal participant shares with two-decimal monetary precision. Any rounding residual is assigned deterministically to the final participant so that allocations reconcile to the relevant transaction amount.
+
+### Synchronization Scope
+
+Automatic synchronization or reconciliation of existing `cash_settlements` and `cash_statements` after upstream transaction or participant changes is deferred. Do not assume that edits to an upstream transaction automatically refresh downstream settlement records.
+
+### Analytical Boundary
+
+Cash settlement tables are operational settlement records. They should not be listed as active Superset datasets or visualizations unless those datasets or visualizations have actually been implemented.
+
 ---
 
 ## `vw_monthly_payments`
@@ -232,9 +315,7 @@ Multiple payment obligations may contribute to a single row when they share the 
 
 ### Dependencies
 
-The view depends on:
-
-- `payment_obligations`
+The view depends on `payment_obligations`.
 
 The payment-obligation layer provides the payment amounts, payment due dates, and obligation classifications represented by the analytical dataset.
 
@@ -303,6 +384,7 @@ Superset consumes PostgreSQL analytical datasets rather than querying the FastAP
 The current visualization datasets are:
 
 - `vw_transactions` for transaction-level reporting and visualization
+- `vw_payment_obligation_participants` for participant-level allocation analysis associated with payment obligations
 - `vw_monthly_payments` for payment-obligation and monthly payment reporting
 
 The current reporting and visualization flow is:
@@ -311,6 +393,8 @@ The current reporting and visualization flow is:
 PostgreSQL
      |
      +-- vw_transactions
+     |
+     +-- vw_payment_obligation_participants
      |
      +-- vw_monthly_payments
               |
@@ -335,6 +419,7 @@ The analytics layer follows a separation of responsibilities.
 
 The core tables store the platform's underlying financial data and relationships:
 
+- `people`
 - `transactions`
 - `payment_sources`
 - `credit_cards`
@@ -342,6 +427,8 @@ The core tables store the platform's underlying financial data and relationships
 - `installment_schedule`
 - `recurring_expenses`
 - `recurring_schedule`
+- `cash_settlements`
+- `cash_statements`
 
 These tables support the application's operational data requirements.
 
@@ -351,11 +438,14 @@ These tables support the application's operational data requirements.
 
 It separates the concept of the original spending event from the payment obligations used for payment analysis, including single-payment, installment, and recurring obligations.
 
+Cash settlement allocation and statement tracking are separate from this semantic layer. They support interpersonal reimbursement tracking and must not be interpreted as additional spending or payment-obligation records.
+
 ### Analytical Views
 
 Analytical views provide derived datasets for reporting and visualization:
 
 - `vw_transactions` provides an enriched transaction-level dataset, including `obligation_type`.
+- `vw_payment_obligation_participants` provides participant-level allocation analysis at payment-obligation × participant grain.
 - `vw_monthly_payments` provides aggregated payment information based on resolved `payment_obligations.payment_due`.
 
 ### Apache Superset
@@ -413,8 +503,12 @@ The current analytics layer supports:
 - daily expense reporting
 - transaction-obligation classification through `obligation_type`
 - payment-obligation semantics for single-payment, installment, and recurring obligations
+- participant-level payment-obligation allocation analysis through `vw_payment_obligation_participants`
 - monthly payment analysis through `vw_monthly_payments`
 - aggregation of payment amounts and payment-obligation counts
+- cash/e-wallet reimbursement allocations for eligible `NORMAL` transactions
+- beneficiary statements grouped by owner, beneficiary, and due date
+- Friday-based due dates and `PENDING`/`PAID` statement status for Cash Payment & Interpersonal Settlement V1
 - Apache Superset reporting and visualization
 - recurring-generated transactions participating in the existing analytical layer
 
@@ -427,3 +521,4 @@ The analytics layer does not implement:
 - cash-flow forecasting
 - a dedicated recurring-expense analytical view
 - a dedicated recurring-expense Superset dashboard
+- automatic synchronization or reconciliation of cash settlement records after upstream transaction or participant changes

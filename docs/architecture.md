@@ -2,11 +2,11 @@
 
 ## Overview
 
-The Finance Data Platform separates financial transaction capture, application processing, persistent storage, payment-obligation processing, and analytics into distinct layers.
+The Finance Data Platform separates financial transaction capture, application processing, persistent storage, payment-obligation processing, interpersonal settlement tracking, and analytics into distinct layers.
 
 The architecture is designed so that transaction capture and application logic remain independent from analytical reporting and visualization.
 
-Apache Superset is the current reporting and visualization platform for the project.
+PostgreSQL is the central source of truth for transaction data and database-controlled financial processing. Apache Superset is the current reporting and visualization platform.
 
 ## Architecture
 
@@ -28,33 +28,32 @@ FastAPI
   v
 PostgreSQL
   |
-  +-- Operational Tables
+  +-- Reference and Operational Tables
+  |     |
+  |     +-- people
   |     |
   |     +-- transactions
-  |     |       |
   |     |       +-- payment_source_id
-  |     |                |
-  |     |                v
-  |     |         payment_sources
+  |     |       +-- owner_id
+  |     |       +-- participant_ids
   |     |
+  |     +-- payment_sources
   |     +-- credit_cards
-  |     |
   |     +-- installment_plans
-  |     |
   |     +-- installment_schedule
-  |     |
   |     +-- recurring_expenses
-  |     |
   |     +-- recurring_schedule
   |
   +-- Payment Semantic Layer
-  |     |
   |     +-- payment_obligations
   |
+  +-- Interpersonal Settlement Layer
+  |     +-- cash_settlements
+  |     +-- cash_statements
+  |
   +-- Analytical Views
-        |
         +-- vw_transactions
-        |
+        +-- vw_payment_obligation_participants
         +-- vw_monthly_payments
                 |
                 v
@@ -62,22 +61,42 @@ PostgreSQL
         (Reporting & Visualization)
 ```
 
+The diagram describes the logical architecture. It does not imply that every table is joined into every analytical view or that the cash settlement tables are currently exposed as Superset datasets.
+
 ## Data Flow
 
 1. A user enters a financial transaction through the web application.
-2. The frontend sends the transaction data to the FastAPI application as a JSON request.
+2. The frontend sends the transaction data to FastAPI as a JSON request.
 3. FastAPI validates the submitted data using Pydantic models.
 4. The application connects to PostgreSQL using environment-based database configuration.
-5. The original transaction is stored in the `transactions` table.
-6. Each transaction references a record in `payment_sources` through `payment_source_id`.
-7. Credit-card-specific information is maintained separately in the `credit_cards` reference table.
-8. When a credit-card transaction includes an installment request, FastAPI invokes the database-controlled `create_installment_plan()` function.
-9. The database uses the authoritative transaction amount to create the corresponding `installment_plans` and `installment_schedule` records.
-10. The `payment_obligations` layer represents the applicable payment obligations for single-payment credit-card transactions, installment transactions, and recurring-generated transactions.
-11. PostgreSQL analytical views provide datasets for analytics and reporting.
-12. Apache Superset connects to PostgreSQL and uses the analytical views for reporting and visualization.
+5. The original transaction is stored in `transactions`.
+6. The transaction references a record in `payment_sources` through `payment_source_id`.
+7. Transaction ownership and explicit participant membership are represented through `owner_id` and `participant_ids`.
+8. Credit-card-specific information is maintained separately in the `credit_cards` reference table.
+9. When a credit-card transaction includes an installment request, FastAPI invokes the database-controlled `create_installment_plan()` function.
+10. The database uses the authoritative transaction amount to create the corresponding `installment_plans` and `installment_schedule` records.
+11. The `payment_obligations` layer represents the applicable payment obligations for single-payment credit-card transactions, installment transactions, and recurring-generated transactions.
+12. Eligible cash and e-wallet transactions can produce interpersonal reimbursement allocations in `cash_settlements`, which are grouped into `cash_statements`.
+13. PostgreSQL analytical views provide datasets for analytics and reporting.
+14. Apache Superset connects to PostgreSQL and uses the analytical views for reporting and visualization.
 
-The original transaction remains the source of truth for the spending event. Installment schedule records represent derived payment obligations rather than additional purchases.
+The original transaction remains the source of truth for the spending event. Installment schedule records represent derived payment obligations rather than additional purchases. Cash settlement allocations track reimbursement between people and are also not additional spending transactions.
+
+### Transaction Ownership and Participants
+
+The `owner_id` identifies the person associated with the transaction as its owner/payer. The `participant_ids` array records explicit participant membership for that transaction.
+
+Participant handling follows these rules:
+
+- An empty participant array means the owner is the implicit participant and does not create a reimbursement allocation.
+- When the owner is included in a non-empty participant list, the owner's own share is excluded from reimbursement allocation.
+- When the owner is absent from a non-empty participant list, the owner is not automatically inserted into that list.
+- A transaction with multiple non-owner beneficiaries can produce separate allocation rows for those beneficiaries.
+- Participant-level allocation data must not be counted as additional original spending transactions.
+
+The participant-level payment-obligation view supports analysis at payment-obligation × participant grain. It is distinct from the transaction-level view and from the interpersonal cash settlement tables.
+
+### Recurring Expenses
 
 The platform also supports bounded recurring commitments:
 
@@ -104,13 +123,43 @@ recurring_schedule              future-dated transactions
 
 Creating a recurring expense causes the database-controlled recurring process to generate its bounded schedule and immediately materialize the corresponding future-dated transaction records.
 
-The generated transactions use the scheduled `payment_date` as their `transaction_date` and are classified as:
-
-```text
-obligation_type = RECURRING
-```
+The generated transactions use the scheduled `payment_date` as their `transaction_date` and are classified as `RECURRING` through `obligation_type`.
 
 The recurring schedule maintains its relationship to the recurring definition through `recurring_id`. The current implementation does not maintain a persistent foreign-key relationship between `recurring_schedule` and generated transactions.
+
+### Cash Payment and Interpersonal Settlement
+
+The cash settlement flow handles eligible cash-based reimbursements separately from the payment-obligation semantic layer.
+
+```text
+transactions
+(owner_id, participant_ids)
+        |
+        v
+Eligibility:
+CASH or E_WALLET source
+and obligation_type = NORMAL
+        |
+        v
+cash_settlements
+(transaction × beneficiary allocation)
+        |
+        v
+cash_statements
+(owner × beneficiary × due date)
+```
+
+V1 behavior:
+
+- Eligibility requires `payment_sources.payment_type` to be `CASH` or `E_WALLET` and `transactions.obligation_type` to be `NORMAL`.
+- GCash is represented by an e-wallet payment source.
+- `cash_settlements` stores transaction-level reimbursement allocations between the owner and each eligible non-owner beneficiary.
+- The due date is the first Friday on or after the transaction date. Monday through Friday transactions use that week's Friday; Saturday and Sunday transactions use the following Friday.
+- `cash_statements` groups settlement amounts by owner, beneficiary, and due date.
+- Statement status is tracked as `PENDING` or `PAID`. Partial payments are not supported in V1.
+- Cash settlement records are separate from `payment_obligations` and do not create additional spending transactions.
+
+Automatic synchronization or reconciliation of existing settlement and statement records after upstream transaction or participant changes is deferred. The architecture must not be interpreted as guaranteeing that changes to an upstream transaction automatically refresh downstream cash settlement records.
 
 ## Application Layer
 
@@ -154,13 +203,13 @@ The application excludes `RECURRING` transactions from its normal recent-expense
 
 ## Database Layer
 
-PostgreSQL provides persistent storage, relational integrity, payment-obligation processing, and analytical datasets for the platform.
+PostgreSQL provides persistent storage, relational integrity, payment-obligation processing, recurring transaction generation, interpersonal settlement tracking, and analytical datasets for the platform.
 
-The database separates the original spending event from derived installment and payment-obligation information.
+The database separates the original spending event from derived installment and payment-obligation information, as well as from reimbursement allocations between people.
 
 ### Transactions
 
-The `transactions` table stores the core financial transaction records:
+The `transactions` table stores the core financial transaction records, including:
 
 - `expense_id`
 - `transaction_date`
@@ -172,6 +221,8 @@ The `transactions` table stores the core financial transaction records:
 - `notes`
 - `created_at`
 - `obligation_type`
+- `owner_id`
+- `participant_ids`
 
 The transaction identifier is generated automatically using a PostgreSQL identity column.
 
@@ -187,6 +238,14 @@ The original transaction remains the authoritative spending record. Creating an 
 - `INSTALLMENT` — credit-card transaction associated with an installment plan
 
 The value is derived by the application or database-controlled process as appropriate and is not a user-controlled frontend field.
+
+`owner_id` identifies the transaction owner/payer. `participant_ids` stores the explicit participant membership associated with the transaction. These fields support participant allocation and interpersonal settlement processing.
+
+### People
+
+The `people` reference entity represents people who can be associated with transaction ownership, participant membership, and interpersonal settlement records.
+
+The transaction's `owner_id` and `participant_ids` provide ownership and participant information used by downstream processing. The exact physical constraints and reference enforcement should be confirmed against the current database implementation.
 
 ### Recurring Expenses
 
@@ -240,6 +299,8 @@ The `payment_sources` table stores reusable payment-source reference data, inclu
 Transactions reference payment sources through `payment_source_id` rather than storing the payment-source name directly.
 
 When transaction data is retrieved through the appropriate application query path, the payment-source reference can be joined to provide the user-visible `payment_name`.
+
+For Cash Payment and Interpersonal Settlement V1, eligible payment types are `CASH` and `E_WALLET`, and the transaction must have `obligation_type = NORMAL`.
 
 ### Credit Cards
 
@@ -331,14 +392,40 @@ The current `payment_obligations` implementation does not provide payment obliga
 
 This semantic layer separates the original spending event from the payment obligations used for payment-level analysis.
 
+### Cash Settlements and Statements
+
+The interpersonal settlement layer consists of `cash_settlements` and `cash_statements`.
+
+`cash_settlements` records transaction-level reimbursement allocations between a transaction owner and eligible non-owner beneficiaries. A transaction with multiple non-owner beneficiaries can produce a separate settlement allocation for each beneficiary.
+
+Allocation uses equal participant shares with two-decimal monetary precision. Any rounding residual is assigned deterministically to the final participant so that allocations reconcile to the relevant transaction amount.
+
+`cash_statements` groups settlement allocations by owner, beneficiary, and due date. The statement identifies the beneficiary and tracks settlement status using `PENDING` or `PAID`. Partial payments are not supported in V1.
+
+The due date is the first Friday on or after the transaction date:
+
+- Monday through Friday: that week's Friday
+- Saturday or Sunday: the following Friday
+
+The cash settlement layer is limited to transactions whose payment source type is `CASH` or `E_WALLET` and whose `obligation_type` is `NORMAL`.
+
+These records are not additional spending transactions and do not belong to the `payment_obligations` semantic layer.
+
+Automatic synchronization of settlement and statement records after upstream transaction or participant updates is deferred. Until that behavior is implemented and validated, the system should not be assumed to automatically reconcile downstream records when their source data changes.
+
 ### Analytical Views
 
 PostgreSQL provides analytical views used by Apache Superset.
 
 - `vw_transactions` provides transaction-level data enriched with the human-readable `payment_name` from `payment_sources` and the system-derived `obligation_type`.
+- `vw_payment_obligation_participants` provides participant-level allocation analysis at payment-obligation × participant grain.
 - `vw_monthly_payments` provides aggregated payment-level data based on the current `payment_obligations` semantic layer.
 
 `vw_monthly_payments` consumes resolved `payment_due` values from `payment_obligations`. It does not independently reconstruct payment timing from `credit_cards`.
+
+`vw_payment_obligation_participants` is not a transaction-grain dataset. Joining it to transaction-level data can multiply rows when an obligation has multiple participants. Aggregations must account for the intended grain.
+
+The analytical views do not imply that cash settlement tables are currently exposed as Superset datasets.
 
 ## Analytics Layer
 
@@ -349,21 +436,22 @@ Superset connects directly to PostgreSQL rather than to the web application. Thi
 The current analytical datasets are:
 
 - `vw_transactions` for transaction-level reporting and visualization
+- `vw_payment_obligation_participants` for participant-level allocation analysis associated with payment obligations
 - `vw_monthly_payments` for payment-level reporting
 
-The conceptual analytical flow is:
+The conceptual analytical flow for payment reporting is:
 
 ```text
-transactions
-     |
-     v
-payment_obligations
-     |
-     v
-vw_monthly_payments
-     |
-     v
-Apache Superset
+transactions / installment schedules / recurring transactions
+                         |
+                         v
+               payment_obligations
+                         |
+                         v
+               vw_monthly_payments
+                         |
+                         v
+                  Apache Superset
 ```
 
 `vw_transactions` provides a separate transaction-level analytical dataset:
@@ -380,7 +468,20 @@ vw_transactions
 Apache Superset
 ```
 
+Participant-level payment-obligation analysis uses:
+
+```text
+payment_obligations
+        +
+participant allocation data
+        |
+        v
+vw_payment_obligation_participants
+```
+
 Recurring-generated transactions participate in the existing analytical layer through `payment_obligations`, `vw_transactions`, and `vw_monthly_payments`.
+
+Cash settlement tables are operational settlement records and should not be described as active Superset datasets unless a dataset or visualization is explicitly implemented.
 
 A dedicated recurring-expense analytical view or dedicated recurring Superset dashboard is not currently part of the implementation.
 
@@ -411,7 +512,7 @@ Each layer has a defined responsibility:
 
 - Frontend: user interaction and transaction capture
 - FastAPI: application logic, validation, authentication, and database operation orchestration
-- PostgreSQL: persistent data storage, relational integrity, installment processing, recurring schedule and transaction generation, payment-obligation semantics, and analytical datasets
+- PostgreSQL: persistent data storage, relational integrity, installment processing, recurring schedule and transaction generation, payment-obligation semantics, cash settlement allocation and statement persistence, and analytical datasets
 - Apache Superset: reporting and visualization
 
 ### Separation of Spending and Payment Obligations
@@ -422,7 +523,9 @@ Installment plans and schedules represent the relationship and derived payment a
 
 The payment-obligation layer represents the current payment obligations used for payment-level analysis, including single-payment credit-card, installment, and recurring obligations.
 
-This prevents installment payments from being interpreted as separate purchases.
+Cash settlements represent interpersonal reimbursement allocations and are not additional spending transactions or payment obligations.
+
+This separation prevents installment payments and reimbursement allocations from being interpreted as separate purchases.
 
 ### Reference Data Separation
 
@@ -430,7 +533,7 @@ Reusable reference data is separated from transaction records.
 
 Transactions store stable identifiers such as `payment_source_id`, while descriptive payment-source information is maintained in the `payment_sources` table.
 
-Credit-card-specific attributes are maintained separately in `credit_cards`.
+Credit-card-specific attributes are maintained separately in `credit_cards`. People are represented through the `people` reference entity and associated with transactions and settlement records through ownership and participant data.
 
 ### Centralized Data
 
@@ -446,11 +549,11 @@ This allows the operational database model and the reporting layer to remain sep
 
 ### Extensibility
 
-The separation between transaction data, reference data, installment processing, recurring commitments, payment obligations, application processing, and analytics provides a foundation for extending the platform with additional financial use cases.
+The separation between transaction data, reference data, installment processing, recurring commitments, payment obligations, interpersonal settlement processing, application processing, and analytics provides a foundation for extending the platform with additional financial use cases.
 
 ### Portfolio Focus
 
-The platform demonstrates how an application can capture structured business data, validate and persist it in a relational database, derive payment obligations from transactional data, and make purpose-specific datasets available for reporting and visualization.
+The platform demonstrates how an application can capture structured business data, validate and persist it in a relational database, derive payment obligations from transactional data, manage interpersonal reimbursement allocations, and make purpose-specific datasets available for reporting and visualization.
 
 ### Recurring Commitment Separation
 
